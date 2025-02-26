@@ -1,0 +1,7 @@
+{
+    "require": {
+        "guzzlehttp/guzzle": "^7.0",
+        "smalot/pdfparser": "^2.0",
+        "thiagoalessio/tesseract_ocr": "^2.13"
+    }
+}
