@@ -38,7 +38,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
     try {
         $response = $client->post('http://192.168.0.101:11434/api/generate', [
             'json' => [
-                'model' => 'mistral:7b-instruct-v0.3-q4_0',
+                'model' => 'phi4:latest',
                 'prompt' => $prompt,
                 'stream' => false,
                 'max_tokens' => 500,
