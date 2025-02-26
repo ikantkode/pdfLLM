@@ -54,16 +54,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
                 return "<li>" . htmlspecialchars(trim($line)) . "</li>";
             }, explode("\n", $llmResponse))) . "</ul>";
         } elseif ($responseFormat === 'json') {
-            $llmResponse = "<pre><code>" . htmlspecialchars(json_encode(json_decode($llmResponse, true), JSON_PRETTY_PRINT) . "</code></pre>";
+            $llmResponse = "<pre><code>" . htmlspecialchars(json_encode(json_decode($llmResponse, true), JSON_PRETTY_PRINT)) . "</code></pre>";
         } else {
             $llmResponse = nl2br(htmlspecialchars($llmResponse));
         }
 
         echo $llmResponse;
     } catch (Exception $e) {
+        error_log("Error communicating with Ollama: " . $e->getMessage());
         echo "Error: " . $e->getMessage();
     }
 } else {
+    error_log("Invalid request method or missing message.");
     echo "Invalid request.";
 }
 ?>

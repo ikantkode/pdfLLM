@@ -1,3 +1,31 @@
+<?php
+session_start();
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+// Function to check Ollama status
+function checkOllamaStatus() {
+    $url = 'http://192.168.0.101:11434'; // Ollama server URL
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 2); // Timeout after 2 seconds
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    // Check if the response is valid
+    if ($httpCode === 200) {
+        return "Connected";
+    } else {
+        error_log("Ollama status check failed. HTTP Code: $httpCode, Response: $response");
+        return "Not running";
+    }
+}
+
+// Check Ollama status
+$ollamaStatus = checkOllamaStatus();
+?>
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
