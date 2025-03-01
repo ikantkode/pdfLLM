@@ -1,6 +1,34 @@
 # pdfLLM - Chat with your PDFs Completely Local!
 A core php application meant for a proof of concept. Built completely with Grok 3 without any kind of coding experience. I am literally illiterate in coding. Allows you to chat with your PDFs only or if you want you can chat with PDF + LLM using Ollama. Too poor for APIs so use free stuff.
 
+#### The Actual Goal
+There is a lot of data out there in the world that some of us are struggling to comprehend. My vision is to help the world. The students, the curious ones, the tinkerers, the kids, and as a professional in the construction industry - where a lot of non-technical people are, help those people too. The caveat with existing technology? It is not simple. I always like simplicity. I hope I never fade away from it, and I hope I always help people. If this project helps you. Don't do anything. Just be kind to someone.
+
+# Change Log 
+** so profressional, ermahgurd **
+03/01/2025 - I erased original broken code and uploaded a 100% (i think) fixed code
+1. Broken CSS: New Chat button will not require users to refresh. Ajax will take care of that.
+2. Uploaded files will now either be saved into b2 or your local drive.
+3. Deleting files will delete all instances of that specific file from your database (record entry, pgVector, etc). as well as from your hard drive/b2.
+
+# Known issues/thoughts as of 03/01/2025
+
+1. There is a "loading" button that comes up on the right side of send button. I am being lazy about it.
+2. Some texts come back as gibberish/broken words. This is mainly for PDFs that require OCR (we use Tesseract OCR package). Currently LLM is hard-coded to fish out broken words and provide you with proper context. If you have issues, please do share.
+3. Text-Embedding. I am not sure what this is, apparently helps you do what we are trying to do much better. I think we are headed towards RAG but meh, I still like this lightweight thing better.
+
+# Road Map
+I never thought I would be able to do this, but since I can continue, I will - it will remain open source, all of it. I am going to host this app for demo purposes on its own domain.
+
+### Milestones:
+1. Move from core-php to something lightweight, but also some framework that is easy to follow.
+2. Look into embedding and implement.
+3. Allow users to use their APIs (Open AI, DeepSeek).
+4. Create an API system
+5. Create mobile app with Flutter for both iOS/Android
+6. Watch the absolutely amazing and genius Sesame project and implement/play with it when the time arrives
+7. Basically add continuous voice-chat model so that users can converse with their own data. Not some generic data from an LLM.
+
 # Who am I? And why did I make this? And how did I make this?
 I am shakespear94 from reddit. I used Grok 3 to make this over the course of 2.5 days roughly 30 hours of consecutive work. I have no coding or technical knowledge, but I can follow basic instructions. I found LLMs can provide that. Of course they hallucinate, and of course we cannot make production ready applications just yet. But I don't have time to wait. I don't want to make agentic AI crap, RAG things, stuff I don't even comprehend. I have tried DeepSeek-R1, ChatGPT (Free), and now tried Grok 3 (Free), and Grok 3 was a winner in this case. For a poor man to be able to do this, I feel very hopeful for what lays ahead.
 
@@ -27,7 +55,9 @@ I only know how to do this on linux, so ask an LLM to help you otherwise.
 This is easy. First user is admin. So just go to localhost/index.php (or login.php if you fancy) and use the sign up button. 
 
 # Uploading
-*Local Uploading is going to be completed tomorrow. CSS and Deletion aren't working, so I am opting to not include it at the moment. But if you must experiment, there is an index2.php, and process2.php - basically, remove index.php and process.php and rename index2 to index.php and process2 to process.php - Best O' luck, because my brain is fried and dried.
+*Local uploading is now fully functional (as of 03/01/2025) but you are alternatively able to set up backblaze b2. If you have other requests like S3, or something like that, open an issue and I will have my handy dandy llm help us out. Or if you are a coder, and want to help, feel free.
+
+Local Files are all uploaded to /uploads of your project directory. Be mindful of your hard-drive space. The files are then parsed, saved into pgVector, and you are able to do normal things. Deleting files is going to delete everything related to that file in the database and your local drive.
 Go to backblaze, create an account, here is a link: https://www.backblaze.com/sign-up/cloud-storage read up on it. Create a bucket, and then copy it's ID:
 
 ![image](https://github.com/user-attachments/assets/9dbc696e-8eff-40ac-b0b1-0d87029617a8)
