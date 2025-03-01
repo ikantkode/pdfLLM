@@ -1,90 +1,156 @@
 <?php
-require 'vendor/autoload.php';
-use Smalot\PdfParser\Parser;
-use thiagoalessio\TesseractOCR\TesseractOCR;
-
 session_start();
-error_reporting(E_ALL);
+require 'db.php';
+require 'vendor/autoload.php';
+require_once 'b2_utils.php';
+
 ini_set('display_errors', 0);
 ini_set('log_errors', 1);
 ini_set('error_log', '/var/www/html/chatpdf/php_errors.log');
 
 header('Content-Type: application/json');
 
-$response = ['success' => false, 'error' => 'Unknown error'];
-
-try {
-    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        $uploadDir = 'uploads/';
-        if (!is_dir($uploadDir)) {
-            mkdir($uploadDir, 0755, true);
-        }
-
-        if (isset($_POST['cloud-link']) && !empty($_POST['cloud-link'])) {
-            // Handle cloud storage link
-            $cloudLink = $_POST['cloud-link'];
-            $fileName = basename($cloudLink);
-            $filePath = $uploadDir . $fileName;
-
-            // Download the file
-            $fileContent = file_get_contents($cloudLink);
-            if ($fileContent === false) {
-                throw new Exception("Failed to download file from the provided link.");
-            }
-
-            if (file_put_contents($filePath, $fileContent)) {
-                error_log("File downloaded from cloud: $filePath");
-            } else {
-                throw new Exception("Failed to save downloaded file.");
-            }
-        } elseif (isset($_FILES['pdf']) && $_FILES['pdf']['error'] === UPLOAD_ERR_OK) {
-            // Handle file upload
-            $file = $_FILES['pdf'];
-            $filePath = $uploadDir . basename($file['name']);
-
-            error_log("Attempting to move uploaded file to: $filePath");
-
-            if (move_uploaded_file($file['tmp_name'], $filePath)) {
-                error_log("File moved successfully to: $filePath");
-            } else {
-                $error = "Failed to move uploaded file.";
-                error_log($error);
-                throw new Exception($error);
-            }
-        } else {
-            throw new Exception("No file or link provided.");
-        }
-
-        // Process the file (text extraction or OCR)
-        $text = '';
-        try {
-            $parser = new Parser();
-            $pdf = $parser->parseFile($filePath);
-            $text = $pdf->getText();
-            error_log("Parser text: " . substr($text, 0, 500));
-        } catch (Exception $e) {
-            error_log("Parser error: " . $e->getMessage());
-        }
-
-        if (empty(trim($text))) {
-            // OCR logic here (same as before)
-        }
-
-        $_SESSION['pdf_text'] = $text;
-        $_SESSION['pdf_name'] = basename($filePath);
-
-        $response = [
-            'success' => true,
-            'pdf_name' => basename($filePath)
-        ];
-    } else {
-        $response['error'] = "Invalid request method.";
-    }
-} catch (Exception $e) {
-    error_log("Unhandled exception: " . $e->getMessage());
-    $response['error'] = $e->getMessage();
+if (!isset($_SESSION['user_id'])) {
+    error_log("No user_id in session.");
+    echo json_encode(['success' => false, 'error' => 'Not authorized']);
+    exit;
 }
 
-error_log("Response: " . json_encode($response));
-echo json_encode($response);
+$userId = $_SESSION['user_id'];
+
+if (isset($_FILES['pdf'])) {
+    $file = $_FILES['pdf'];
+    $storage = $_POST['storage'] ?? 'local';
+    $originalName = $file['name'];
+    $sanitizedName = preg_replace('/[^A-Za-z0-9\-_\.]/', '_', $originalName);
+    $tempPath = $file['tmp_name'];
+
+    if ($file['error'] !== UPLOAD_ERR_OK) {
+        error_log("Upload error for $originalName: " . $file['error']);
+        echo json_encode(['success' => false, 'error' => 'Upload failed']);
+        exit;
+    }
+
+    try {
+        $pdfText = extractTextFromPDF($tempPath);
+        if ($pdfText === false) {
+            throw new Exception("Failed to extract text from PDF");
+        }
+
+        $uniqueName = $userId . '_' . uniqid() . '_' . $sanitizedName;
+        $fileUrl = '';
+
+        if ($storage === 'local') {
+            $uploadDir = __DIR__ . '/uploads/';
+            if (!is_dir($uploadDir)) {
+                mkdir($uploadDir, 0755, true);
+            }
+            $destination = $uploadDir . $uniqueName;
+            if (!move_uploaded_file($tempPath, $destination)) {
+                throw new Exception("Failed to move file to local storage");
+            }
+            $fileUrl = 'uploads/' . $uniqueName;
+        } else if ($storage === 'b2') {
+            $b2File = uploadToB2($tempPath, $uniqueName);
+            if (!$b2File || !isset($b2File['fileId'])) {
+                throw new Exception("Failed to upload to B2");
+            }
+            $fileUrl = getB2DownloadUrl($b2File['fileId']);
+        } else {
+            throw new Exception("Invalid storage option");
+        }
+
+        $stmt = $pdo->prepare("INSERT INTO pdfs (user_id, file_name, file_url, extracted_text) VALUES (?, ?, ?, ?)");
+        $stmt->execute([$userId, $uniqueName, $fileUrl, $pdfText]);
+        $pdfId = $pdo->lastInsertId();
+
+        error_log("PDF uploaded: $uniqueName for user $userId to $storage");
+        echo json_encode(['success' => true, 'pdf_id' => $pdfId]);
+    } catch (Exception $e) {
+        error_log("Error processing PDF $originalName: " . $e->getMessage());
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+        if ($storage === 'local' && isset($destination) && file_exists($destination)) {
+            unlink($destination);
+        }
+    }
+    exit;
+}
+
+if (isset($_POST['delete_id'])) {
+    $pdfId = $_POST['delete_id'];
+    error_log("Attempting to delete PDF ID: $pdfId for user $userId");
+    try {
+        $stmt = $pdo->prepare("SELECT file_name, file_url FROM pdfs WHERE id = ? AND user_id = ?");
+        $stmt->execute([$pdfId, $userId]);
+        $pdf = $stmt->fetch();
+
+        if ($pdf) {
+            $fileUrl = $pdf['file_url'];
+            error_log("Found PDF with file_url: $fileUrl");
+
+            if (strpos($fileUrl, 'uploads/') === 0) {
+                $filePath = __DIR__ . '/' . $fileUrl;
+                error_log("Checking local file path: $filePath");
+                if (file_exists($filePath)) {
+                    if (unlink($filePath)) {
+                        error_log("Successfully deleted local file: $filePath");
+                    } else {
+                        error_log("Failed to delete local file: $filePath - Permission or path issue");
+                    }
+                } else {
+                    error_log("Local file not found at: $filePath");
+                }
+            } else {
+                try {
+                    deleteFromB2($pdf['file_name']);
+                    error_log("Successfully deleted B2 file: " . $pdf['file_name']);
+                } catch (Exception $b2e) {
+                    error_log("Failed to delete B2 file " . $pdf['file_name'] . ": " . $b2e->getMessage());
+                }
+            }
+
+            $stmt = $pdo->prepare("DELETE FROM pdfs WHERE id = ? AND user_id = ?");
+            $stmt->execute([$pdfId, $userId]);
+            error_log("Deleted PDF ID $pdfId from database for user $userId");
+
+            echo json_encode(['success' => true]);
+        } else {
+            error_log("PDF ID $pdfId not found or not authorized for user $userId");
+            echo json_encode(['success' => false, 'error' => 'PDF not found or not authorized']);
+        }
+    } catch (Exception $e) {
+        error_log("Error deleting PDF ID $pdfId: " . $e->getMessage());
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    }
+    exit;
+}
+
+if (isset($_POST['fetch_pdfs'])) {
+    try {
+        $stmt = $pdo->prepare("SELECT id, file_name, vectorized FROM pdfs WHERE user_id = ? ORDER BY uploaded_at DESC");
+        $stmt->execute([$userId]);
+        $pdfs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        error_log("Fetched PDFs for user $userId: " . json_encode($pdfs));
+        echo json_encode($pdfs);
+    } catch (Exception $e) {
+        error_log("Error fetching PDFs: " . $e->getMessage());
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    }
+    exit;
+}
+
+echo json_encode(['success' => false, 'error' => 'Invalid request']);
+exit;
+
+function extractTextFromPDF($filePath) {
+    try {
+        $parser = new \Smalot\PdfParser\Parser();
+        $pdf = $parser->parseFile($filePath);
+        $text = $pdf->getText();
+        return $text ?: 'No text extracted';
+    } catch (Exception $e) {
+        error_log("PDF text extraction failed: " . $e->getMessage());
+        return false;
+    }
+}
 ?>
