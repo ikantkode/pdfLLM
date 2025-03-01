@@ -15,6 +15,14 @@ Best of luck everyone, with poor man's love, shakespear. *walk into sunset...*
 Use your favorite LLM (ChatGPT/DeepSeek, Grok, or whatever. Give it this prompt if you're lazy like me:
 **This is the db.php from the code, can you please give me directions to set up postgre, pgadmin4 and pgvector. host is localhost, dbname is pdfchat, user is shake pass is itall1234** - and it should help you out, otherwise start praying to whatver god you believe in. I did the same.
 
+# Set Up Composer
+I only know how to do this on linux, so ask an LLM to help you otherwise.
+
+1. Install composer
+2. cd into the directory
+3. For simplicity run *sudo composer install*
+4. It will get you the vendor folder and it is required. Otherwise the app is going to fail.
+
 # Creating Admin User
 This is easy. First user is admin. So just go to localhost/index.php (or login.php if you fancy) and use the sign up button. 
 
