@@ -1,0 +1,271 @@
+[26-Feb-2025 03:32:27 UTC] Text from parser: 
+[26-Feb-2025 03:32:27 UTC] pdftoppm location: /usr/bin/pdftoppm
+
+[26-Feb-2025 03:32:28 UTC] pdftoppm command: pdftoppm -png -f 1 -l 1 'uploads/Sunset OT PW2.pdf' 'uploads/temp_image'
+[26-Feb-2025 03:32:28 UTC] pdftoppm output: No output
+[26-Feb-2025 03:32:28 UTC] pdftoppm return code: 0
+[26-Feb-2025 03:32:28 UTC] PHP Fatal error:  Uncaught Error: Class "TesseractOCR" not found in /var/www/html/chatpdf/process.php:44
+Stack trace:
+#0 {main}
+  thrown in /var/www/html/chatpdf/process.php on line 44
+[26-Feb-2025 04:07:25 UTC] Text from parser: 
+[26-Feb-2025 04:07:25 UTC] pdftoppm location: /usr/bin/pdftoppm
+
+[26-Feb-2025 04:07:25 UTC] pdftoppm command: pdftoppm -png -f 1 -l 1 'uploads/1.pdf' 'uploads/temp_image'
+[26-Feb-2025 04:07:25 UTC] pdftoppm output: No output
+[26-Feb-2025 04:07:25 UTC] pdftoppm return code: 0
+[26-Feb-2025 04:07:25 UTC] PHP Fatal error:  Uncaught Error: Class "TesseractOCR" not found in /var/www/html/chatpdf/process.php:44
+Stack trace:
+#0 {main}
+  thrown in /var/www/html/chatpdf/process.php on line 44
+[26-Feb-2025 04:08:11 UTC] Starting upload: Sunset OT PW2.pdf
+[26-Feb-2025 04:08:11 UTC] File moved to: uploads/Sunset OT PW2.pdf
+[26-Feb-2025 04:08:11 UTC] Parser text: 
+[26-Feb-2025 04:08:11 UTC] Running pdftoppm: pdftoppm -png -f 1 -l 1 'uploads/Sunset OT PW2.pdf' 'uploads/temp_image'
+[26-Feb-2025 04:08:12 UTC] pdftoppm output: No output
+[26-Feb-2025 04:08:12 UTC] pdftoppm return code: 0
+[26-Feb-2025 04:08:12 UTC] Image created: uploads/temp_image-1.png
+[26-Feb-2025 04:08:12 UTC] PHP Fatal error:  Uncaught Error: Class "TesseractOCR" not found in /var/www/html/chatpdf/process.php:51
+Stack trace:
+#0 {main}
+  thrown in /var/www/html/chatpdf/process.php on line 51
+[26-Feb-2025 04:08:33 UTC] Starting upload: Sunset OT PW2.pdf
+[26-Feb-2025 04:08:33 UTC] File moved to: uploads/Sunset OT PW2.pdf
+[26-Feb-2025 04:08:33 UTC] Parser text: 
+[26-Feb-2025 04:08:33 UTC] Running pdftoppm: pdftoppm -png -f 1 -l 1 'uploads/Sunset OT PW2.pdf' 'uploads/temp_image'
+[26-Feb-2025 04:08:34 UTC] pdftoppm output: No output
+[26-Feb-2025 04:08:34 UTC] pdftoppm return code: 0
+[26-Feb-2025 04:08:34 UTC] Image created: uploads/temp_image-1.png
+[26-Feb-2025 04:08:34 UTC] PHP Fatal error:  Uncaught Error: Class "TesseractOCR" not found in /var/www/html/chatpdf/process.php:51
+Stack trace:
+#0 {main}
+  thrown in /var/www/html/chatpdf/process.php on line 51
+[26-Feb-2025 04:13:06 UTC] Starting upload: Sunset OT PW2.pdf
+[26-Feb-2025 04:13:06 UTC] File moved to: uploads/Sunset OT PW2.pdf
+[26-Feb-2025 04:13:07 UTC] Parser text: 
+[26-Feb-2025 04:13:07 UTC] Running pdftoppm: pdftoppm -png -f 1 -l 1 'uploads/Sunset OT PW2.pdf' 'uploads/temp_image'
+[26-Feb-2025 04:13:07 UTC] pdftoppm output: No output
+[26-Feb-2025 04:13:07 UTC] pdftoppm return code: 0
+[26-Feb-2025 04:13:07 UTC] Image created: uploads/temp_image-1.png
+[26-Feb-2025 04:13:09 UTC] OCR text: NYG PW2: Work Permit Application ovent and at BIS
+Must be typewritten.
+
+oama anne
+Buildings bo]
+
+BIS Document No. required: 302574284
+
+1 REASON FOR FILING (required for all applications)
+
+Oo Initial Permit (complete all sections) Expected work start date: Oo Renewal Permit with changes (complete all sections)
+[Z No Work Permit Renewal Permit without changes 1, 3, 4, 7- 12
+
+2 LOCATION INFORMATION (required for all applications)
+
+House No(s) 153 Street Name 35th St
+Borough Brooklyn Block 688 Lot 2
+[26-Feb-2025 04:13:09 UTC] Response: {"success":true,"pdf_name":"Sunset OT PW2.pdf"}
+[26-Feb-2025 04:13:54 UTC] Starting upload: JAZIB HAIDER TAX 2023.pdf
+[26-Feb-2025 04:13:54 UTC] Response: {"success":false,"error":"Failed to move uploaded file: 1"}
+[26-Feb-2025 04:14:05 UTC] Starting upload: JAZIB HAIDER TAX 2023.pdf
+[26-Feb-2025 04:14:05 UTC] Response: {"success":false,"error":"Failed to move uploaded file: 1"}
+[26-Feb-2025 04:14:10 UTC] Starting upload: JAZIB HAIDER TAX 2023.pdf
+[26-Feb-2025 04:14:10 UTC] Response: {"success":false,"error":"Failed to move uploaded file: 1"}
+[26-Feb-2025 04:14:13 UTC] Starting upload: JAZIB HAIDER TAX 2023.pdf
+[26-Feb-2025 04:14:13 UTC] Response: {"success":false,"error":"Failed to move uploaded file: 1"}
+[26-Feb-2025 04:16:12 UTC] Starting upload: JAZIB HAIDER TAX 2023.pdf
+[26-Feb-2025 04:16:12 UTC] Response: {"success":false,"error":"Failed to move uploaded file: 1"}
+[26-Feb-2025 04:19:19 UTC] Starting upload: JAZIB HAIDER TAX 2023.pdf
+[26-Feb-2025 04:19:19 UTC] File moved to: uploads/JAZIB HAIDER TAX 2023.pdf
+[26-Feb-2025 04:19:20 UTC] Parser text: KHURRAM R KHAN
+646 CONEY ISLAND AVE
+BROOKLYN, NY 11218
+June 21, 2024
+JAZIB HAIDER and REHMAT UN NISA
+3962 FLATLANDS AVE, APT BSMT
+Brooklyn, NY 11234
+Dear JAZIB HAIDER and REHMAT UN NISA,
+Thank you for choosing our firm to prepare your income tax returns for tax year 2023. This letter confirms the services we will provide.
+We will prepare your federal and state returns for tax year 2023 based on information you provide.Although our work will not include 
+procedures to discover irregularities or i
+[26-Feb-2025 04:19:20 UTC] Response: {"success":true,"pdf_name":"JAZIB HAIDER TAX 2023.pdf"}
+[26-Feb-2025 04:36:17 UTC] File downloaded from cloud: uploads/UNSIGNED_UPDATED+NEW+RPP+PROPOSAL.pdf
+[26-Feb-2025 04:36:18 UTC] Parser text: ROBERT PARCHMENT PLUMBING & HEATING, INC.                                  .                                      
+ 
+3281 Broadway, Ne w York, NY 10027 
+Tel: (212)694-2537 
+Email: rpplumb@aol.co m  
+Website: www.parchmentplumbing.com 
+ 
+  
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Certified DBE and MBE entity 
+NYC LIC. MASTER PLUMBER #1413 
+NYC LIC. SPRINKLER CONTRACTOR #721B 
+NJS LIC. MASTER PLUMBER #10613 
+ 
+ 
+March 6, 2022 
+RPPH22-0028 
+ 
+ATTN:  Estimating Department     
+RE:  P.S. 123M RPZ Backflow Prevention Devices  
+[26-Feb-2025 04:36:18 UTC] Response: {"success":true,"pdf_name":"UNSIGNED_UPDATED+NEW+RPP+PROPOSAL.pdf"}
+[26-Feb-2025 04:38:55 UTC] File downloaded from cloud: uploads/08210++Wood+Door.pdf
+[26-Feb-2025 04:38:56 UTC] Parser text: 09/25/2020 	DESIGN NO. D020080  
+NYCSCA – K307 PoT 	WOOD DOORS 08210 - 1  
+SECTION 08210 
+WOOD DOORS 
+ 
+PART 1 - GENERAL 
+ 
+1.01 DESCRIPTION OF WORK 
+ 
+A. Provide all interior flush wood doors with wood 
+veneer, factory-finished, prefit and premachined as 
+indicated on the Drawings and as specified herein. 
+ 
+1.02 SUSTAINABILITY REQUIREMENTS 
+ 
+A. Sustainability requirements included in the Section 
+are as follows: 
+ 
+1. Restrictions on the use of urea -formaldehyde 
+containing materials . 
+1.
+[26-Feb-2025 04:38:56 UTC] Response: {"success":true,"pdf_name":"08210++Wood+Door.pdf"}
+[26-Feb-2025 04:44:46 UTC] Parser text: KHURRAM R KHAN
+646 CONEY ISLAND AVE
+BROOKLYN, NY 11218
+June 21, 2024
+JAZIB HAIDER and REHMAT UN NISA
+3962 FLATLANDS AVE, APT BSMT
+Brooklyn, NY 11234
+Dear JAZIB HAIDER and REHMAT UN NISA,
+Thank you for choosing our firm to prepare your income tax returns for tax year 2023. This letter confirms the services we will provide.
+We will prepare your federal and state returns for tax year 2023 based on information you provide.Although our work will not include 
+procedures to discover irregularities or i
+[26-Feb-2025 04:44:46 UTC] Response: {"success":true,"pdf_name":"JAZIB HAIDER TAX 2023.pdf"}
+[26-Feb-2025 04:47:02 UTC] Parser text: 
+[26-Feb-2025 04:47:02 UTC] Response: {"success":true,"pdf_name":"Sunset OT PW2.pdf"}
+[26-Feb-2025 04:48:29 UTC] File downloaded from cloud: uploads/08210++Wood+Door.pdf
+[26-Feb-2025 04:48:30 UTC] Parser text: 09/25/2020 	DESIGN NO. D020080  
+NYCSCA – K307 PoT 	WOOD DOORS 08210 - 1  
+SECTION 08210 
+WOOD DOORS 
+ 
+PART 1 - GENERAL 
+ 
+1.01 DESCRIPTION OF WORK 
+ 
+A. Provide all interior flush wood doors with wood 
+veneer, factory-finished, prefit and premachined as 
+indicated on the Drawings and as specified herein. 
+ 
+1.02 SUSTAINABILITY REQUIREMENTS 
+ 
+A. Sustainability requirements included in the Section 
+are as follows: 
+ 
+1. Restrictions on the use of urea -formaldehyde 
+containing materials . 
+1.
+[26-Feb-2025 04:48:30 UTC] Response: {"success":true,"pdf_name":"08210++Wood+Door.pdf"}
+[26-Feb-2025 04:50:28 UTC] Parser text: 
+[26-Feb-2025 04:50:28 UTC] Response: {"success":true,"pdf_name":"K307 - AMB-Varsity Assignment.pdf"}
+[26-Feb-2025 04:53:41 UTC] Parser text: 
+[26-Feb-2025 04:53:41 UTC] Text is empty, attempting OCR...
+[26-Feb-2025 04:53:41 UTC] Running pdftoppm: pdftoppm -png -f 1 -l 1 'uploads/K307 - AMB-Varsity Assignment.pdf' 'uploads/temp_image'
+[26-Feb-2025 04:53:53 UTC] pdftoppm output: No output
+[26-Feb-2025 04:53:53 UTC] pdftoppm return code: 0
+[26-Feb-2025 04:53:53 UTC] Image created: uploads/temp_image-1.png
+[26-Feb-2025 04:53:55 UTC] OCR text: extent that payment is made by the Authority directly to the Assignee hereunder.
+
+IN WITNESS WHEREOPF, the Assignor has hereby set its hand and seal, and caused
+these presents to be signed by its authorized corporate officer and caused its corporate seal to be
+
+affixed hereto this 25 day of february , 2025.
+
+IN THE PRESENCE OF:
+
+(Seal)
+
+By:
+Name:
+
+Title: YA a4 as Su =
+
+ACKNOWLEDGMENT
+
+«The UPS Shore FostMeodov
+COUNTY OF /oSsev )
+
+On this 25 day of Fer vol » , 2025 before personally appeared
+Mo
+[26-Feb-2025 04:53:55 UTC] Response: {"success":true,"pdf_name":"K307 - AMB-Varsity Assignment.pdf"}
+[26-Feb-2025 04:54:03 UTC] Parser text: 
+[26-Feb-2025 04:54:03 UTC] Text is empty, attempting OCR...
+[26-Feb-2025 04:54:03 UTC] Running pdftoppm: pdftoppm -png -f 1 -l 1 'uploads/K307 - AMB-Varsity Assignment.pdf' 'uploads/temp_image'
+[26-Feb-2025 04:54:15 UTC] pdftoppm output: No output
+[26-Feb-2025 04:54:15 UTC] pdftoppm return code: 0
+[26-Feb-2025 04:54:15 UTC] Image created: uploads/temp_image-1.png
+[26-Feb-2025 04:54:17 UTC] OCR text: extent that payment is made by the Authority directly to the Assignee hereunder.
+
+IN WITNESS WHEREOPF, the Assignor has hereby set its hand and seal, and caused
+these presents to be signed by its authorized corporate officer and caused its corporate seal to be
+
+affixed hereto this 25 day of february , 2025.
+
+IN THE PRESENCE OF:
+
+(Seal)
+
+By:
+Name:
+
+Title: YA a4 as Su =
+
+ACKNOWLEDGMENT
+
+«The UPS Shore FostMeodov
+COUNTY OF /oSsev )
+
+On this 25 day of Fer vol » , 2025 before personally appeared
+Mo
+[26-Feb-2025 04:54:17 UTC] Response: {"success":true,"pdf_name":"K307 - AMB-Varsity Assignment.pdf"}
+[26-Feb-2025 04:56:06 UTC] Parser text: 
+[26-Feb-2025 04:56:06 UTC] Text is empty, attempting OCR...
+[26-Feb-2025 04:56:06 UTC] Running pdftoppm: pdftoppm -png -f 1 -l 1 'uploads/K307 - AMB-Varsity Assignment.pdf' 'uploads/temp_image'
+[26-Feb-2025 04:56:18 UTC] pdftoppm output: No output
+[26-Feb-2025 04:56:18 UTC] pdftoppm return code: 0
+[26-Feb-2025 04:56:18 UTC] Image created: uploads/temp_image-1.png
+[26-Feb-2025 04:56:20 UTC] OCR text: extent that payment is made by the Authority directly to the Assignee hereunder.
+
+IN WITNESS WHEREOPF, the Assignor has hereby set its hand and seal, and caused
+these presents to be signed by its authorized corporate officer and caused its corporate seal to be
+
+affixed hereto this 25 day of february , 2025.
+
+IN THE PRESENCE OF:
+
+(Seal)
+
+By:
+Name:
+
+Title: YA a4 as Su =
+
+ACKNOWLEDGMENT
+
+«The UPS Shore FostMeodov
+COUNTY OF /oSsev )
+
+On this 25 day of Fer vol » , 2025 before personally appeared
+Mo
+[26-Feb-2025 04:56:20 UTC] Response: {"success":true,"pdf_name":"K307 - AMB-Varsity Assignment.pdf"}
