@@ -27,6 +27,7 @@ I only know how to do this on linux, so ask an LLM to help you otherwise.
 This is easy. First user is admin. So just go to localhost/index.php (or login.php if you fancy) and use the sign up button. 
 
 # Uploading
+*Local Uploading is going to be completed tomorrow. CSS and Deletion aren't working, so I am opting to not include it at the moment. But if you must experiment, there is an index2.php, and process2.php - basically, remove index.php and process.php and rename index2 to index.php and process2 to process.php - Best O' luck, because my brain is fried and dried.
 Go to backblaze, create an account, here is a link: https://www.backblaze.com/sign-up/cloud-storage read up on it. Create a bucket, and then copy it's ID:
 
 ![image](https://github.com/user-attachments/assets/9dbc696e-8eff-40ac-b0b1-0d87029617a8)
