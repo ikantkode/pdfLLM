@@ -13,7 +13,7 @@ Best of luck everyone, with poor man's love, shakespear. *walk into sunset...*
 
 # Setting Up Postgre
 Use your favorite LLM (ChatGPT/DeepSeek, Grok, or whatever. Give it this prompt if you're lazy like me:
-**This is the db.php from the code, can you please give me directions to set up postgre, pgadmin4 and pgvector. host is localhost, dbname is pdfchat, user is shake pass is itall1234** - and it should help you out, otherwise start praying to whatver god you believe in. I did the same.
+**This is the db.php from the code, can you please give me directions to set up postgre, pgadmin4 and pgvector. host is localhost, dbname is pdfchat, user is shake pass is itall1234** - and it should help you out, otherwise start praying to whatever god you believe in. I did the same.
 
 # Set Up Composer
 I only know how to do this on linux, so ask an LLM to help you otherwise.
