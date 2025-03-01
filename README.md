@@ -50,7 +50,7 @@ This mode allows LLM to access the knowledge that is vectorized (some magic thro
 4. At the bottom, Chat Mode says PDF Only by default, you can use dropdown menu to select whatever you want.
 
 # Model Recommendation
-As if I am intelligent enough in this sector even write here. Use phi4:latest or any 7B model. I did not try with 1B models because they have an IQ of less than a 5 minute old baby monkey. I know the deal, use case, blah blah. Take your technical knowledge and enjoy. I cry because I don't have it - yet. Kidding, honestly, did not try it, can't tell/recommend.
+As if I am intelligent enough in this sector to even write here. Use phi4:latest or any 7B model - but this depends on how much your system can handle. If you have 4GB VRAM, then go for 3B models, or if you have 4GB VRAM = 8 GB RAM, then try 7B models. But truth be told, play with it, its not that serious. I did not try with 1B models because they have an IQ of less than a 5 minute old baby monkey. I know the deal, use case, blah blah. Take your technical knowledge and enjoy. I cry because I don't have it - yet. Kidding, honestly, did not try it, can't tell/recommend.
 
 # Deleting of Files
 When a file is deleted, through computer magic, the files are moved to deleted folder in b2, and then after that deleted (i have not fully tested this so consider this a warning, don't go crazy). The vector data and database are wiped of the file's existence as well. But as I am not a coder I cannot test that either. I will try to do this when my brain recovers from doing all this.
