@@ -69,10 +69,34 @@ Admin Panel allows you to see and select the model you want all the peasants to 
 
 # Chat Mode
 At the bottom of the app, you are able to select 2 modes, PDF only and PDF + LLM
-**PDF Only** 
+#### PDF Only 
 This mode limits the context to just the PDF. 
-**PDF + LLM**
+#### PDF + LLM**
 This mode allows LLM to access the knowledge that is vectorized (some magic through pgVector) and then allows you to converse with it. You can ask it dumb questions like summarize this pdf but how gen-alpha talks. It is so funny lol.
+
+# Set Up / Install
+#### Prerequisites
+- Use Ubuntu or a debian based flavor. If you are on windows use WSL? Not sure.
+- Apache/Nginx
+- Composer
+- Postgre & pgAdmin4 (web) install.
+- General knowledge of how this stuff works.
+
+#### Steps to install
+1. Open Terminal -> git clone {git clone repo url}
+2. cd pdfLLM
+3. composer install (please google how to install it)
+4. sudo su postgres (this will login you in as postgres user)
+5. psql -U postgres (this will allow you login to postgresSQL, aka psql, and then you can do command magic)
+6. CREATE DATABASE chatpdf; (you are able to change the name of the database, just make sure you adjust db.php after)
+7. Once the database is created, switch to pgAdmin4 and login.
+
+![418319967-e8d102a7-64ee-45ca-9b0d-1ddba2ce3ae8](https://github.com/user-attachments/assets/95ae55c5-7bd1-423d-8a4b-639b8967e966)
+
+   
+8. Paste the entire file from setupdb.txt into the sql center as I call it. Follow my train of thoughts here, if you have never done this before like me, you should do this. Its a good way to learn. Otherwise I dont even know how you got this far.
+
+   ![image](https://github.com/user-attachments/assets/68409207-06ea-4ad3-ae57-716b8963d384)
 
 # Using the App
 1. You must upload at least one document. There is an upload button. You can select multiple files.
