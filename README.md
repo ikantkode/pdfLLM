@@ -23,6 +23,7 @@ There is a lot of data out there in the world that some of us are struggling to 
 2. Some texts come back as gibberish/broken words. This is mainly for PDFs that require OCR (we use Tesseract OCR package). Currently LLM is hard-coded to fish out broken words and provide you with proper context. If you have issues, please do share.
 3. Text-Embedding. I am not sure what this is, apparently helps you do what we are trying to do much better. I think we are headed towards RAG but meh, I still like this lightweight thing better.
 4. Issues with mobile version. Its not even working - I am working on fixing it, I have fixed it 40% - update as of 11:00 PM
+5. Issue with "Preview" button on index.php - "My PDFs". Fix under way.
 
 #### Date: 03/02/2025
 1. Upon reading up more, talking to ChatGPT/DeepSeek - I think we have created a simple RAG solution with semantic search. I understand why we need embedding models. They help with 
