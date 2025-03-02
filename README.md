@@ -72,7 +72,7 @@ Admin Panel allows you to see and select the model you want all the peasants to 
 At the bottom of the app, you are able to select 2 modes, PDF only and PDF + LLM
 #### PDF Only 
 This mode limits the context to just the PDF. 
-#### PDF + LLM**
+#### PDF + LLM
 This mode allows LLM to access the knowledge that is vectorized (some magic through pgVector) and then allows you to converse with it. You can ask it dumb questions like summarize this pdf but how gen-alpha talks. It is so funny lol.
 
 # Set Up / Install
