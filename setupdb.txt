@@ -1,0 +1,64 @@
+--COPY THE COMMANDS FROM THIS TXT FILE AS A WHOLE, YES, YOU CAN COMMENT EVEN THIS PART AND PASTE IT INTO PGADMIN4 AREA PER THE INSTRUCTIONS AND ACTUALLY BE ABLE TO SET IT UP.
+-- Create tables
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL,
+    role TEXT DEFAULT 'user' CHECK (role IN ('user', 'admin')),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE pdfs (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    file_name TEXT NOT NULL,
+    file_url TEXT NOT NULL,
+    extracted_text TEXT NOT NULL,
+    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    vectorized BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE pdf_chunks (
+    id SERIAL PRIMARY KEY,
+    pdf_id INTEGER NOT NULL REFERENCES pdfs(id) ON DELETE CASCADE,
+    chunk_text TEXT NOT NULL
+);
+
+CREATE TABLE chats (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    selected_pdf_ids TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE chat_messages (
+    id SERIAL PRIMARY KEY,
+    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_message TEXT NOT NULL,
+    llm_response TEXT,
+    pdf_ids TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE settings (
+    id SERIAL PRIMARY KEY,
+    key TEXT NOT NULL UNIQUE,
+    value TEXT NOT NULL
+);
+
+-- Add indexes
+CREATE INDEX idx_pdfs_user_id ON pdfs(user_id);
+CREATE INDEX idx_chats_user_id ON chats(user_id);
+CREATE INDEX idx_chat_messages_chat_id ON chat_messages(chat_id);
+CREATE INDEX idx_pdf_chunks_pdf_id ON pdf_chunks(pdf_id);
+
+-- Insert initial settings
+INSERT INTO settings (key, value) VALUES
+    ('ollama_model', 'mistral:7b-instruct-v0.3-q4_0'),
+    ('allow_user_model_select', 'no');
+
+-- Optional: Add a test user (replace 'hashed_password')
+INSERT INTO users (username, password, role) VALUES
+    ('testuser', 'hashed_password', 'user');
