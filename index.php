@@ -28,7 +28,7 @@ try {
 }
 
 try {
-    $stmt = $pdo->prepare("SELECT id, file_name, vectorized FROM pdfs WHERE user_id = ? ORDER BY uploaded_at DESC");
+    $stmt = $pdo->prepare("SELECT id, file_name, file_url, vectorized FROM pdfs WHERE user_id = ? ORDER BY uploaded_at DESC");
     $stmt->execute([$userId]);
     $pdfs = $stmt->fetchAll(PDO::FETCH_ASSOC);
     error_log("PDFs fetched: " . json_encode($pdfs));
@@ -82,6 +82,10 @@ $chatNumbers = array_map(function($chat) {
     return (int)preg_replace('/^Chat (\d+)$/', '$1', $chat['title']);
 }, $chats);
 $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
+
+$sidebarWidth = ($_SESSION['role'] === 'admin') ? '20%' : '350px';
+$sidebarMaxWidth = ($_SESSION['role'] === 'admin') ? '600px' : '350px';
+$chatAreaMarginLeft = ($_SESSION['role'] === 'admin') ? '20%' : '350px';
 ?>
 <!DOCTYPE html>
 <html>
@@ -92,32 +96,64 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
     <link rel="icon" href="data:,">
     <style>
         body { margin: 0; height: 100vh; overflow: hidden; }
-        .chat-container { display: flex; height: 100vh; }
-        .sidebar { position: absolute; width: 320px; height: 100%; padding: 1.5rem; background: #f5f5f5; overflow-y: auto; z-index: 1; }
-        .chat-area { margin-left: 320px; flex-grow: 1; display: flex; flex-direction: column; }
-        .chat-box { flex-grow: 1; padding: 1.5rem; overflow-y: auto; position: relative; }
-        .chat-input { padding: 1rem; background: #fafafa; border-top: 1px solid #dbdbdb; }
-        .message { margin: 1rem 0; padding: 1rem; border-radius: 6px; }
-        .user-message { background: #3273dc; color: white; margin-left: auto; max-width: 80%; }
-        .llm-response { background: #f0f4f8; border-left: 4px solid #3273dc; max-width: 80%; }
+        .chat-container { display: flex; height: 100vh; position: relative; }
+        .sidebar { 
+            position: absolute; 
+            top: 0; 
+            left: 0; 
+            width: <?php echo $sidebarWidth; ?>; 
+            max-width: <?php echo $sidebarMaxWidth; ?>; 
+            height: 100%; 
+            padding: 1.5rem; 
+            background: #f5f5f5; 
+            overflow-y: auto; 
+            transition: transform 0.3s ease; 
+            color: #333; 
+            z-index: 1000; 
+        }
+        .sidebar.hidden { transform: translateX(-100%); }
+        .chat-area { 
+            flex-grow: 1; 
+            display: flex; 
+            flex-direction: column; 
+            margin-left: <?php echo $chatAreaMarginLeft; ?>; 
+        }
+        .chat-box { flex-grow: 1; padding: 1rem; overflow-y: auto; position: relative; }
+        .chat-input { padding: 1rem; background: #fafafa; border-top: 1px solid #dbdbdb; display: block; }
+        .message { margin: 0.5rem 0; padding: 0.75rem; border-radius: 6px; max-width: 80%; word-wrap: break-word; }
+        .user-message { background: #3273dc; color: white; margin-left: auto; }
+        .llm-response { background: #f0f4f8; border-left: 4px solid #3273dc; }
+        .timestamp { font-size: 0.8rem; margin-top: 0.25rem; }
+        .user-message .timestamp { color: #fff; }
+        .llm-response .timestamp { color: #666; }
         .upload-queue { margin-top: 1rem; }
         .upload-item { display: flex; align-items: center; margin-bottom: 0.5rem; gap: 0.5rem; }
-        .pdf-name-button { white-space: normal; text-align: left; overflow-wrap: break-word; word-wrap: break-word; max-width: 200px; height: auto; padding: 0.5rem; }
+        .pdf-name-button { white-space: normal; text-align: left; overflow-wrap: break-word; word-wrap: break-word; max-width: 300px; height: auto; padding: 0.5rem; }
         .scroll-to-bottom { position: sticky; bottom: 1rem; right: 1rem; float: right; }
         .is-focused { background-color: #e0e0e0; }
         .chat-start { display: flex; justify-content: center; align-items: center; height: 100%; }
-        .edit-chat-btn { margin-left: 5px; }
+        .edit-chat-btn { margin-left: 0.5rem; }
+        .box { padding: 1.5rem; margin-bottom: 1.5rem; }
+        .chat-btn { flex-grow: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .chat-list-item { display: flex; align-items: center; width: 100%; }
+        .hamburger { display: none; font-size: 1.5rem; cursor: pointer; padding: 0.5rem; position: fixed; top: 1rem; left: 1rem; z-index: 1001; }
         @media (max-width: 768px) {
             .chat-container { flex-direction: column; }
-            .sidebar { position: relative; width: 100%; max-width: 100%; height: auto; }
-            .chat-area { margin-left: 0; }
-            .chat-box { padding: 1rem; }
-            .chat-input { padding: 0.5rem; }
+            .sidebar { position: fixed; top: 0; left: 0; width: 100%; max-width: 300px; height: 100%; z-index: 1000; transform: translateX(-100%); background: #f5f5f5; color: #333; }
+            .sidebar.active { transform: translateX(0); }
+            .chat-area { margin-left: 0; width: 100%; }
+            .chat-box { padding: 0.5rem; }
+            .chat-input { padding: 0.5rem; display: block; }
             .pdf-name-button { max-width: 100%; }
+            .hamburger { display: block; }
+            .message { max-width: 90%; }
+            .timestamp { font-size: 0.7rem; }
+            .box { padding: 1rem; }
         }
     </style>
 </head>
 <body>
+    <div class="hamburger">☰</div>
     <div class="chat-container">
         <div class="sidebar">
             <h4 class="title is-4 has-text-centered-mobile">Welcome, <?php echo htmlspecialchars($username); ?>!</h4>
@@ -163,8 +199,8 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
                         <li class="notification">No chats available.</li>
                     <?php else: ?>
                         <?php foreach ($chats as $chat): ?>
-                            <li class="is-flex is-align-items-center mb-2">
-                                <button class="button is-text chat-btn mr-2 is-fullwidth-mobile <?php echo $chat['id'] === $currentChatId ? 'is-focused' : ''; ?>" data-chat-id="<?php echo $chat['id']; ?>">
+                            <li class="chat-list-item mb-2">
+                                <button class="button is-text chat-btn mr-2 <?php echo $chat['id'] === $currentChatId ? 'is-focused' : ''; ?>" data-chat-id="<?php echo $chat['id']; ?>">
                                     <?php echo htmlspecialchars($chat['title']); ?>
                                 </button>
                                 <button class="button is-small edit-chat-btn" data-chat-id="<?php echo $chat['id']; ?>">Edit</button>
@@ -185,8 +221,9 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
                             <?php $originalName = str_replace('_', ' ', pathinfo($pdf['file_name'], PATHINFO_FILENAME)) . '.' . pathinfo($pdf['file_name'], PATHINFO_EXTENSION); ?>
                             <li class="is-flex is-align-items-center mb-2 is-flex-wrap-wrap">
                                 <input class="checkbox mr-2 pdf-checkbox" type="checkbox" data-pdf-id="<?php echo $pdf['id']; ?>" <?php echo in_array($pdf['id'], $selectedPdfIds) ? 'checked' : ''; ?>>
-                                <button class="button is-text mr-2 is-fullwidth-mobile pdf-name-button"><?php echo htmlspecialchars($originalName); ?></button>
+                                <button class="button is-text mr-2 pdf-name-button"><?php echo htmlspecialchars($originalName); ?></button>
                                 <?php if ($pdf['vectorized']): ?><span class="tag is-success mr-2">Vectorized</span><?php endif; ?>
+                                <a href="<?php echo htmlspecialchars($pdf['file_url']); ?>" target="_blank" class="button is-info is-small mr-2">Preview</a>
                                 <button class="button is-danger is-small delete-btn" data-pdf-id="<?php echo $pdf['id']; ?>">Delete</button>
                             </li>
                         <?php endforeach; ?>
@@ -264,6 +301,7 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
         let currentChatId = <?php echo json_encode($currentChatId); ?>;
         let isGenerating = false;
         let nextChatNumber = <?php echo $nextChatNumber; ?>;
+        let isUserScrolled = false;
 
         document.addEventListener('DOMContentLoaded', () => {
             if (<?php echo count($chats) > 0 ? 'true' : 'false'; ?>) {
@@ -275,6 +313,17 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
             }
             updateChatList();
             updatePdfList();
+
+            const hamburger = document.querySelector('.hamburger');
+            const sidebar = document.querySelector('.sidebar');
+            hamburger.addEventListener('click', () => {
+                sidebar.classList.toggle('hidden');
+                sidebar.classList.toggle('active');
+            });
+
+            if (window.innerWidth > 768) {
+                sidebar.classList.remove('hidden');
+            }
         });
 
         document.getElementById('upload-form').addEventListener('submit', async (e) => {
@@ -349,6 +398,7 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
             }
 
             isUploading = false;
+            document.getElementById('upload-queue').innerHTML = '';
             saveChatContext();
         }
 
@@ -415,9 +465,9 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
                 } else {
                     chats.forEach(chat => {
                         const li = document.createElement('li');
-                        li.className = 'is-flex is-align-items-center mb-2';
+                        li.className = 'chat-list-item mb-2';
                         li.innerHTML = `
-                            <button class="button is-text chat-btn mr-2 is-fullwidth-mobile ${chat.id === currentChatId ? 'is-focused' : ''}" data-chat-id="${chat.id}">
+                            <button class="button is-text chat-btn mr-2 ${chat.id === currentChatId ? 'is-focused' : ''}" data-chat-id="${chat.id}">
                                 ${chat.title}
                             </button>
                             <button class="button is-small edit-chat-btn" data-chat-id="${chat.id}">Edit</button>
@@ -531,8 +581,9 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
                         li.className = 'is-flex is-align-items-center mb-2 is-flex-wrap-wrap';
                         li.innerHTML = `
                             <input class="checkbox mr-2 pdf-checkbox" type="checkbox" data-pdf-id="${pdf.id}" ${selectedPdfIds.includes(pdf.id.toString()) ? 'checked' : ''}>
-                            <button class="button is-text mr-2 is-fullwidth-mobile pdf-name-button">${originalName}</button>
+                            <button class="button is-text mr-2 pdf-name-button">${originalName}</button>
                             ${pdf.vectorized ? '<span class="tag is-success mr-2">Vectorized</span>' : ''}
+                            <a href="${pdf.file_url}" target="_blank" class="button is-info is-small mr-2">Preview</a>
                             <button class="button is-danger is-small delete-btn" data-pdf-id="${pdf.id}">Delete</button>
                         `;
                         pdfList.appendChild(li);
@@ -603,11 +654,16 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
             if (scrollButton) {
                 scrollButton.addEventListener('click', () => {
                     chatBox.scrollTop = chatBox.scrollHeight;
+                    isUserScrolled = false;
                     updateScrollButton();
                 });
             }
             if (chatBox) {
-                chatBox.addEventListener('scroll', updateScrollButton);
+                chatBox.addEventListener('scroll', () => {
+                    const isAtBottom = chatBox.scrollTop + chatBox.clientHeight >= chatBox.scrollHeight - 50;
+                    isUserScrolled = !isAtBottom;
+                    updateScrollButton();
+                });
             }
             if (sendButton) {
                 sendButton.addEventListener('click', sendMessage);
@@ -629,7 +685,6 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
             const text = await response.text();
             console.log('Load chat response:', text);
 
-            // Ensure chat UI exists before loading messages
             const chatArea = document.querySelector('#chat-area');
             chatArea.innerHTML = `
                 <div id="chat-content" class="chat-box">
@@ -682,14 +737,32 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
                 const chatBox = document.getElementById('chat-box');
                 chatBox.innerHTML = '';
                 messages.forEach(msg => {
-                    chatBox.innerHTML += `<div class="message user-message">${msg.user_message}</div>`;
+                    const timestamp = msg.created_at ? new Date(msg.created_at) : new Date();
+                    const formattedTime = timestamp.toLocaleString('en-US', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        month: '2-digit',
+                        day: '2-digit',
+                        year: 'numeric',
+                        hour12: true
+                    }).replace(',', '');
+                    chatBox.innerHTML += `
+                        <div class="message user-message">
+                            ${msg.user_message}
+                            <div class="timestamp">${formattedTime}</div>
+                        </div>`;
                     if (msg.llm_response) {
                         const formattedResponse = formatResponse(msg.llm_response);
-                        chatBox.innerHTML += `<div class="message llm-response">${formattedResponse}</div>`;
+                        chatBox.innerHTML += `
+                            <div class="message llm-response">
+                                ${formattedResponse}
+                                <div class="timestamp">${formattedTime}</div>
+                            </div>`;
                     }
                 });
                 chatBox.scrollTop = chatBox.scrollHeight;
                 updateScrollButton();
+                isUserScrolled = false;
 
                 const chatResponse = await fetch('chat.php', {
                     method: 'POST',
@@ -720,9 +793,25 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
             const mode = document.getElementById('chat-mode').value;
             const chatBox = document.getElementById('chat-box');
             const spinner = document.getElementById('spinner');
-            chatBox.innerHTML += `<div class="message user-message">${input}</div>`;
+
+            const now = new Date();
+            const timestamp = now.toLocaleString('en-US', {
+                hour: '2-digit',
+                minute: '2-digit',
+                month: '2-digit',
+                day: '2-digit',
+                year: 'numeric',
+                hour12: true
+            }).replace(',', '');
+            chatBox.innerHTML += `
+                <div class="message user-message">
+                    ${input}
+                    <div class="timestamp">${timestamp}</div>
+                </div>`;
+            chatBox.scrollTop = chatBox.scrollHeight; // Scroll to user message
             spinner.className = '';
             isGenerating = true;
+            isUserScrolled = false;
 
             const formData = new FormData();
             formData.append('message', input);
@@ -738,11 +827,12 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
                 if (!response.ok) {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let llmResponse = document.createElement('div');
+                const llmResponse = document.createElement('div');
                 llmResponse.className = 'message llm-response';
                 chatBox.appendChild(llmResponse);
+                llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' }); // Initial scroll to response
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
                 let fullResponse = '';
 
                 while (true) {
@@ -755,13 +845,13 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
                             const data = JSON.parse(line.substring(6));
                             if (data.response) {
                                 fullResponse += data.response;
-                                llmResponse.innerHTML = formatResponse(fullResponse);
-                                const isAtBottom = chatBox.scrollTop + chatBox.clientHeight >= chatBox.scrollHeight - 50;
-                                if (isAtBottom) {
-                                    chatBox.scrollTop = chatBox.scrollHeight;
+                                llmResponse.innerHTML = formatResponse(fullResponse) + `<div class="timestamp">${timestamp}</div>`;
+                                if (!isUserScrolled) {
+                                    llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' }); // Follow stream
                                 }
                             } else if (data.error) {
-                                llmResponse.innerHTML = `Error: ${data.error}`;
+                                llmResponse.innerHTML = `Error: ${data.error}<div class="timestamp">${timestamp}</div>`;
+                                llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' });
                                 break;
                             }
                         }
@@ -777,8 +867,9 @@ $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
                 console.error('Send message fetch error:', e);
                 const llmResponse = document.createElement('div');
                 llmResponse.className = 'message llm-response';
-                llmResponse.textContent = 'Error: Failed to connect to the server.';
+                llmResponse.innerHTML = `Error: Failed to connect to the server.<div class="timestamp">${timestamp}</div>`;
                 chatBox.appendChild(llmResponse);
+                llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' });
             }
 
             spinner.className = 'is-hidden';
