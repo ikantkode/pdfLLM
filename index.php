@@ -31,6 +31,9 @@ try {
     $stmt = $pdo->prepare("SELECT id, file_name, file_url, vectorized FROM pdfs WHERE user_id = ? ORDER BY uploaded_at DESC");
     $stmt->execute([$userId]);
     $pdfs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($pdfs as $pdf) {
+        error_log("PDF ID: {$pdf['id']}, file_name: {$pdf['file_name']}, file_url: " . ($pdf['file_url'] ?? 'NULL'));
+    }
     error_log("PDFs fetched: " . json_encode($pdfs));
 } catch (Exception $e) {
     error_log("PDF fetch error: " . $e->getMessage());
@@ -83,10 +86,10 @@ $chatNumbers = array_map(function($chat) {
 }, $chats);
 $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
 
-// Sidebar width: admin gets 20%, others (users) get 350px
 $sidebarWidth = ($_SESSION['role'] === 'admin') ? '20%' : '350px';
 $sidebarMaxWidth = ($_SESSION['role'] === 'admin') ? '600px' : '350px';
 $chatAreaMarginLeft = ($_SESSION['role'] === 'admin') ? '20%' : '350px';
+$baseUploadUrl = '/chatpdf/uploads/';
 ?>
 <!DOCTYPE html>
 <html>
@@ -219,12 +222,15 @@ $chatAreaMarginLeft = ($_SESSION['role'] === 'admin') ? '20%' : '350px';
                         <li class="notification">No PDFs available.</li>
                     <?php else: ?>
                         <?php foreach ($pdfs as $pdf): ?>
-                            <?php $originalName = str_replace('_', ' ', pathinfo($pdf['file_name'], PATHINFO_FILENAME)) . '.' . pathinfo($pdf['file_name'], PATHINFO_EXTENSION); ?>
+                            <?php 
+                            $originalName = str_replace('_', ' ', pathinfo($pdf['file_name'], PATHINFO_FILENAME)) . '.' . pathinfo($pdf['file_name'], PATHINFO_EXTENSION);
+                            $fileUrl = $pdf['file_url'] ? (strpos($pdf['file_url'], 'http') === 0 ? $pdf['file_url'] : $baseUploadUrl . $pdf['file_url']) : $baseUploadUrl . $pdf['file_name'];
+                            ?>
                             <li class="is-flex is-align-items-center mb-2 is-flex-wrap-wrap">
                                 <input class="checkbox mr-2 pdf-checkbox" type="checkbox" data-pdf-id="<?php echo $pdf['id']; ?>" <?php echo in_array($pdf['id'], $selectedPdfIds) ? 'checked' : ''; ?>>
                                 <button class="button is-text mr-2 pdf-name-button"><?php echo htmlspecialchars($originalName); ?></button>
                                 <?php if ($pdf['vectorized']): ?><span class="tag is-success mr-2">Vectorized</span><?php endif; ?>
-                                <a href="<?php echo htmlspecialchars($pdf['file_url']); ?>" target="_blank" class="button is-info is-small mr-2">Preview</a>
+                                <a href="<?php echo htmlspecialchars($fileUrl); ?>" target="_blank" class="button is-info is-small mr-2">Preview</a>
                                 <button class="button is-danger is-small delete-btn" data-pdf-id="<?php echo $pdf['id']; ?>">Delete</button>
                             </li>
                         <?php endforeach; ?>
@@ -303,6 +309,7 @@ $chatAreaMarginLeft = ($_SESSION['role'] === 'admin') ? '20%' : '350px';
         let isGenerating = false;
         let nextChatNumber = <?php echo $nextChatNumber; ?>;
         let isUserScrolled = false;
+        const baseUploadUrl = '<?php echo $baseUploadUrl; ?>';
 
         document.addEventListener('DOMContentLoaded', () => {
             if (<?php echo count($chats) > 0 ? 'true' : 'false'; ?>) {
@@ -577,14 +584,16 @@ $chatAreaMarginLeft = ($_SESSION['role'] === 'admin') ? '20%' : '350px';
                     pdfList.innerHTML = '<li class="notification">No PDFs available.</li>';
                 } else {
                     pdfs.forEach(pdf => {
+                        console.log('Rendering PDF:', pdf.id, 'file_url:', pdf.file_url, 'file_name:', pdf.file_name);
                         const originalName = pdf.file_name.replace(/_/g, ' ').replace(/^[^_]+_([^_]+)_/, '$1_');
+                        const fileUrl = pdf.file_url ? (pdf.file_url.startsWith('http') ? pdf.file_url : baseUploadUrl + pdf.file_url) : baseUploadUrl + pdf.file_name;
                         const li = document.createElement('li');
                         li.className = 'is-flex is-align-items-center mb-2 is-flex-wrap-wrap';
                         li.innerHTML = `
                             <input class="checkbox mr-2 pdf-checkbox" type="checkbox" data-pdf-id="${pdf.id}" ${selectedPdfIds.includes(pdf.id.toString()) ? 'checked' : ''}>
                             <button class="button is-text mr-2 pdf-name-button">${originalName}</button>
                             ${pdf.vectorized ? '<span class="tag is-success mr-2">Vectorized</span>' : ''}
-                            <a href="${pdf.file_url}" target="_blank" class="button is-info is-small mr-2">Preview</a>
+                            <a href="${fileUrl}" target="_blank" class="button is-info is-small mr-2">Preview</a>
                             <button class="button is-danger is-small delete-btn" data-pdf-id="${pdf.id}">Delete</button>
                         `;
                         pdfList.appendChild(li);
@@ -809,7 +818,7 @@ $chatAreaMarginLeft = ($_SESSION['role'] === 'admin') ? '20%' : '350px';
                     ${input}
                     <div class="timestamp">${timestamp}</div>
                 </div>`;
-            chatBox.scrollTop = chatBox.scrollHeight; // Scroll to user message
+            chatBox.scrollTop = chatBox.scrollHeight;
             spinner.className = '';
             isGenerating = true;
             isUserScrolled = false;
@@ -831,7 +840,7 @@ $chatAreaMarginLeft = ($_SESSION['role'] === 'admin') ? '20%' : '350px';
                 const llmResponse = document.createElement('div');
                 llmResponse.className = 'message llm-response';
                 chatBox.appendChild(llmResponse);
-                llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' }); // Initial scroll to response
+                llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' });
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let fullResponse = '';
@@ -848,7 +857,7 @@ $chatAreaMarginLeft = ($_SESSION['role'] === 'admin') ? '20%' : '350px';
                                 fullResponse += data.response;
                                 llmResponse.innerHTML = formatResponse(fullResponse) + `<div class="timestamp">${timestamp}</div>`;
                                 if (!isUserScrolled) {
-                                    llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' }); // Follow stream
+                                    llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' });
                                 }
                             } else if (data.error) {
                                 llmResponse.innerHTML = `Error: ${data.error}<div class="timestamp">${timestamp}</div>`;
