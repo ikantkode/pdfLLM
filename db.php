@@ -5,8 +5,8 @@ error_reporting(E_ALL);
 
 $host = 'localhost';
 $dbname = 'pdfchat'; // New database
-$user = 'admin';
-$password = '1234';
+$user = 'shake';
+$password = 'sibgha';
 
 try {
     $pdo = new PDO("pgsql:host=$host;dbname=$dbname", $user, $password);

@@ -83,6 +83,7 @@ $chatNumbers = array_map(function($chat) {
 }, $chats);
 $nextChatNumber = $chatNumbers ? max($chatNumbers) + 1 : 1;
 
+// Sidebar width: admin gets 20%, others (users) get 350px
 $sidebarWidth = ($_SESSION['role'] === 'admin') ? '20%' : '350px';
 $sidebarMaxWidth = ($_SESSION['role'] === 'admin') ? '600px' : '350px';
 $chatAreaMarginLeft = ($_SESSION['role'] === 'admin') ? '20%' : '350px';

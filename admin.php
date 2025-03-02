@@ -1,82 +1,202 @@
 <?php
 session_start();
 require 'db.php';
+require 'vendor/autoload.php';
+
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
+ini_set('error_log', '/var/www/html/chatpdf/php_errors.log');
+
 if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'admin') {
-    header("Location: index.php");
+    error_log("Unauthorized access attempt to admin.php by user_id: " . ($_SESSION['user_id'] ?? 'unknown'));
+    header("Location: login.php");
     exit;
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_moderator'])) {
-    $username = $_POST['username'];
-    $password = password_hash($_POST['password'], PASSWORD_DEFAULT);
-    $stmt = $pdo->prepare("INSERT INTO users (username, password, role) VALUES (?, ?, 'moderator')");
-    $stmt->execute([$username, $password]);
+$userId = $_SESSION['user_id'];
+$username = $_SESSION['username'] ?? 'Admin';
+
+// Handle user creation
+if (isset($_POST['create_user'])) {
+    $newUsername = trim($_POST['username']);
+    $newPassword = password_hash(trim($_POST['password']), PASSWORD_DEFAULT);
+    $newRole = $_POST['role'] === 'admin' ? 'admin' : 'user'; // Only 'user' or 'admin'
+
+    try {
+        $stmt = $pdo->prepare("INSERT INTO users (username, password, role) VALUES (?, ?, ?)");
+        $stmt->execute([$newUsername, $newPassword, $newRole]);
+        error_log("User created: $newUsername with role: $newRole");
+    } catch (Exception $e) {
+        error_log("User creation error: " . $e->getMessage());
+    }
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ollama_model'])) {
-    $model = $_POST['ollama_model'];
-    $stmt = $pdo->prepare("INSERT INTO settings (key, value) VALUES ('ollama_model', ?) ON CONFLICT (key) DO UPDATE SET value = ?");
-    $stmt->execute([$model, $model]);
+// Handle user deletion
+if (isset($_POST['delete_user'])) {
+    $deleteUserId = $_POST['user_id'];
+    try {
+        $stmt = $pdo->prepare("DELETE FROM users WHERE id = ? AND id != ?"); // Prevent self-deletion
+        $stmt->execute([$deleteUserId, $userId]);
+        error_log("User deleted: ID $deleteUserId");
+    } catch (Exception $e) {
+        error_log("User deletion error: " . $e->getMessage());
+    }
 }
 
-$users = $pdo->query("SELECT id, username, role FROM users WHERE role != 'admin'")->fetchAll();
+// Handle user role update
+if (isset($_POST['update_role'])) {
+    $updateUserId = $_POST['user_id'];
+    $newRole = $_POST['new_role'] === 'admin' ? 'admin' : 'user'; // Only 'user' or 'admin'
+    try {
+        $stmt = $pdo->prepare("UPDATE users SET role = ? WHERE id = ? AND id != ?"); // Prevent self-role change
+        $stmt->execute([$newRole, $updateUserId, $userId]);
+        error_log("User role updated: ID $updateUserId to $newRole");
+    } catch (Exception $e) {
+        error_log("User role update error: " . $e->getMessage());
+    }
+}
 
-// Fetch Ollama models
-$ch = curl_init('http://192.168.0.101:11434/api/tags');
-curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-$ollamaResponse = curl_exec($ch);
-curl_close($ch);
-$ollamaModels = json_decode($ollamaResponse, true)['models'] ?? [];
+// Fetch all users
+try {
+    $stmt = $pdo->prepare("SELECT id, username, role, created_at FROM users ORDER BY created_at DESC");
+    $stmt->execute();
+    $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    error_log("Users fetch error: " . $e->getMessage());
+    $users = [];
+}
 
-$stmt = $pdo->prepare("SELECT value FROM settings WHERE key = 'ollama_model' LIMIT 1");
-$stmt->execute();
-$currentModel = $stmt->fetchColumn() ?: 'mistral:7b-instruct-v0.3-q4_0';
+// Fetch all PDFs
+try {
+    $stmt = $pdo->prepare("SELECT id, user_id, file_name, file_url, uploaded_at FROM pdfs ORDER BY uploaded_at DESC");
+    $stmt->execute();
+    $pdfs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    error_log("PDFs fetch error: " . $e->getMessage());
+    $pdfs = [];
+}
 ?>
+
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Admin Panel</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <title>ChatPDF - Admin Panel</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="data:,">
+    <style>
+        body { margin: 0; padding: 2rem; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .box { margin-bottom: 2rem; }
+        .table-container { overflow-x: auto; }
+        .button.is-small { margin: 0.25rem; }
+    </style>
 </head>
-<body class="bg-light">
-    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
-        <div class="container">
-            <a class="navbar-brand" href="#">ChatPDF Admin</a>
-            <div class="navbar-nav ms-auto">
-                <a class="nav-link" href="index.php">Dashboard</a>
-                <a class="nav-link" href="logout.php">Logout</a>
+<body>
+    <div class="container">
+        <h1 class="title is-1">Admin Panel</h1>
+        <p class="subtitle">Welcome, <?php echo htmlspecialchars($username); ?>!</p>
+        <div class="buttons">
+            <a href="index.php" class="button is-primary">Back to Chat</a>
+            <a href="logout.php" class="button is-light">Logout</a>
+        </div>
+
+        <!-- User Management -->
+        <div class="box">
+            <h2 class="title is-3">Manage Users</h2>
+            <form method="POST" class="field has-addons">
+                <div class="control">
+                    <input class="input" type="text" name="username" placeholder="New Username" required>
+                </div>
+                <div class="control">
+                    <input class="input" type="password" name="password" placeholder="Password" required>
+                </div>
+                <div class="control">
+                    <div class="select">
+                        <select name="role">
+                            <option value="user">User</option>
+                            <option value="admin">Admin</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="control">
+                    <button class="button is-success" name="create_user">Create User</button>
+                </div>
+            </form>
+
+            <div class="table-container">
+                <table class="table is-striped is-fullwidth">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Username</th>
+                            <th>Role</th>
+                            <th>Created At</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($users as $user): ?>
+                            <tr>
+                                <td><?php echo $user['id']; ?></td>
+                                <td><?php echo htmlspecialchars($user['username']); ?></td>
+                                <td><?php echo htmlspecialchars($user['role']); ?></td>
+                                <td><?php echo $user['created_at']; ?></td>
+                                <td>
+                                    <?php if ($user['id'] != $userId): // Prevent self-action ?>
+                                        <form method="POST" style="display:inline;">
+                                            <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
+                                            <div class="select is-small">
+                                                <select name="new_role" onchange="this.form.submit()">
+                                                    <option value="user" <?php echo $user['role'] === 'user' ? 'selected' : ''; ?>>User</option>
+                                                    <option value="admin" <?php echo $user['role'] === 'admin' ? 'selected' : ''; ?>>Admin</option>
+                                                </select>
+                                            </div>
+                                            <input type="hidden" name="update_role" value="1">
+                                        </form>
+                                        <form method="POST" style="display:inline;">
+                                            <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
+                                            <button class="button is-danger is-small" name="delete_user" onclick="return confirm('Are you sure?');">Delete</button>
+                                        </form>
+                                    <?php else: ?>
+                                        <span class="tag is-info">You</span>
+                                    <?php endif; ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
             </div>
         </div>
-    </nav>
-    <div class="container mt-4">
-        <h1>Admin Panel</h1>
-        <h3>Create Moderator</h3>
-        <form method="POST" class="mb-4">
-            <div class="mb-3"><input type="text" name="username" class="form-control" placeholder="Username" required></div>
-            <div class="mb-3"><input type="password" name="password" class="form-control" placeholder="Password" required></div>
-            <button type="submit" name="create_moderator" class="btn btn-success">Create</button>
-        </form>
-        <h3>Users</h3>
-        <table class="table table-striped">
-            <thead><tr><th>ID</th><th>Username</th><th>Role</th></tr></thead>
-            <tbody>
-                <?php foreach ($users as $user): ?>
-                    <tr><td><?php echo $user['id']; ?></td><td><?php echo htmlspecialchars($user['username']); ?></td><td><?php echo $user['role']; ?></td></tr>
-                <?php endforeach; ?>
-            </tbody>
-        </table>
-        <h3>Ollama Model Selection</h3>
-        <form method="POST" class="mb-4">
-            <div class="mb-3">
-                <label for="ollama_model" class="form-label">Select Model (Current: <?php echo htmlspecialchars($currentModel); ?>)</label>
-                <select name="ollama_model" id="ollama_model" class="form-select">
-                    <?php foreach ($ollamaModels as $model): ?>
-                        <option value="<?php echo $model['name']; ?>" <?php echo $model['name'] === $currentModel ? 'selected' : ''; ?>><?php echo htmlspecialchars($model['name']); ?></option>
-                    <?php endforeach; ?>
-                </select>
+
+        <!-- PDF Overview -->
+        <div class="box">
+            <h2 class="title is-3">All PDFs</h2>
+            <div class="table-container">
+                <table class="table is-striped is-fullwidth">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>User ID</th>
+                            <th>File Name</th>
+                            <th>File URL</th>
+                            <th>Uploaded At</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($pdfs as $pdf): ?>
+                            <tr>
+                                <td><?php echo $pdf['id']; ?></td>
+                                <td><?php echo $pdf['user_id']; ?></td>
+                                <td><?php echo htmlspecialchars($pdf['file_name']); ?></td>
+                                <td><a href="<?php echo htmlspecialchars($pdf['file_url']); ?>" target="_blank">View</a></td>
+                                <td><?php echo $pdf['uploaded_at']; ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
             </div>
-            <button type="submit" class="btn btn-primary">Set Model</button>
-        </form>
+        </div>
     </div>
 </body>
 </html>
