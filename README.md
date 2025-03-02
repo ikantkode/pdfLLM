@@ -5,17 +5,18 @@ A core php application meant for a proof of concept. Built completely with Grok 
 There is a lot of data out there in the world that some of us are struggling to comprehend. My vision is to help the world. The students, the curious ones, the tinkerers, the kids, and as a professional in the construction industry - where a lot of non-technical people are, help those people too. The caveat with existing technology? It is not simple. I always like simplicity. I hope I never fade away from it, and I hope I always help people. If this project helps you. Don't do anything. Just be kind to someone.
 
 # Change Log 
-** so profressional, ermahgurd **
-03/01/2025 - I erased original broken code and uploaded a 100% (i think) fixed code
+*so profressional, ermahgurd*
+#### 03/01/2025 - I erased original broken code and uploaded a 100% (i think) fixed code
 1. Broken CSS: New Chat button will not require users to refresh. Ajax will take care of that.
 2. Uploaded files will now either be saved into b2 or your local drive.
 3. Deleting files will delete all instances of that specific file from your database (record entry, pgVector, etc). as well as from your hard drive/b2.
-
-# Known issues/thoughts as of 03/01/2025
-
+4. Updated set up setupdb.txt and instructions to set up database. Completely forgot that was an important part of sharing this whole thing. lol. Realized and implemented @ 11:00 PM 
+# Known issues/thoughts
+#### Date: 03/01/2025
 1. There is a "loading" button that comes up on the right side of send button. I am being lazy about it.
 2. Some texts come back as gibberish/broken words. This is mainly for PDFs that require OCR (we use Tesseract OCR package). Currently LLM is hard-coded to fish out broken words and provide you with proper context. If you have issues, please do share.
 3. Text-Embedding. I am not sure what this is, apparently helps you do what we are trying to do much better. I think we are headed towards RAG but meh, I still like this lightweight thing better.
+4. Issues with mobile version. Its not even working - I am working on fixing it, I have fixed it 40% - update as of 11:00 PM
 
 # Road Map
 I never thought I would be able to do this, but since I can continue, I will - it will remain open source, all of it. I am going to host this app for demo purposes on its own domain.
