@@ -55,10 +55,10 @@ pdfLLM will remain open-source. A demo version will be hosted for broader access
 
 # Prerequisites:
 
-OS: Ubuntu (or Debian-based distro), WSL for Windows
-Web Server: Apache/Nginx
-Database: PostgreSQL & pgAdmin4
-PHP Package Manager: Composer
+- OS: Ubuntu (or Debian-based distro), WSL for Windows
+- Web Server: Apache/Nginx
+- Database: PostgreSQL & pgAdmin4
+- PHP Package Manager: Composer
 
 #### Installation Steps:
 
