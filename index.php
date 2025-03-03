@@ -96,7 +96,7 @@ $baseUploadUrl = '/chatpdf/uploads/';
 <head>
     <title>ChatPDF</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <link rel="icon" href="data:,">
     <style>
         body { margin: 0; height: 100vh; overflow: hidden; }
@@ -122,8 +122,20 @@ $baseUploadUrl = '/chatpdf/uploads/';
             flex-direction: column; 
             margin-left: <?php echo $chatAreaMarginLeft; ?>; 
         }
-        .chat-box { flex-grow: 1; padding: 1rem; overflow-y: auto; position: relative; }
-        .chat-input { padding: 1rem; background: #fafafa; border-top: 1px solid #dbdbdb; display: block; }
+        .chat-box { 
+            flex-grow: 1; 
+            padding: 1rem; 
+            overflow-y: auto; 
+            position: relative; 
+            z-index: 10; 
+        }
+        .chat-input { 
+            padding: 1rem; 
+            background: #fafafa; 
+            border-top: 1px solid #dbdbdb; 
+            display: block; 
+            z-index: 20; 
+        }
         .message { margin: 0.5rem 0; padding: 0.75rem; border-radius: 6px; max-width: 80%; word-wrap: break-word; }
         .user-message { background: #3273dc; color: white; margin-left: auto; }
         .llm-response { background: #f0f4f8; border-left: 4px solid #3273dc; }
@@ -142,12 +154,12 @@ $baseUploadUrl = '/chatpdf/uploads/';
         .chat-list-item { display: flex; align-items: center; width: 100%; }
         .hamburger { display: none; font-size: 1.5rem; cursor: pointer; padding: 0.5rem; position: fixed; top: 1rem; left: 1rem; z-index: 1001; }
         @media (max-width: 768px) {
-            .chat-container { flex-direction: column; }
+            .chat-container { flex-direction: column; height: 100vh; overflow: hidden; }
             .sidebar { position: fixed; top: 0; left: 0; width: 100%; max-width: 300px; height: 100%; z-index: 1000; transform: translateX(-100%); background: #f5f5f5; color: #333; }
             .sidebar.active { transform: translateX(0); }
-            .chat-area { margin-left: 0; width: 100%; }
-            .chat-box { padding: 0.5rem; }
-            .chat-input { padding: 0.5rem; display: block; }
+            .chat-area { margin-left: 0; width: 100%; height: 100vh; position: relative; overflow: hidden; }
+            .chat-box { padding: 0.5rem; max-height: calc(100vh - 130px); overflow-y: auto; position: relative; z-index: 10; }
+            .chat-input { position: fixed; bottom: 0; left: 0; right: 0; padding: 0.5rem; background: #fafafa; border-top: 1px solid #dbdbdb; z-index: 20; }
             .pdf-name-button { max-width: 100%; }
             .hamburger { display: block; }
             .message { max-width: 90%; }
@@ -437,7 +449,7 @@ $baseUploadUrl = '/chatpdf/uploads/';
                     alert('Failed to create chat: ' + result.error);
                 }
             } catch (e) {
-                console.error('New chat JSON parse error:', e, 'Response:', text);
+                console.error('New chat error:', e, 'Response:', text);
                 alert('Error creating chat: ' + e.message);
             }
             document.getElementById('chat-title').value = '';
@@ -818,7 +830,7 @@ $baseUploadUrl = '/chatpdf/uploads/';
                     ${input}
                     <div class="timestamp">${timestamp}</div>
                 </div>`;
-            chatBox.scrollTop = chatBox.scrollHeight;
+            chatBox.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'end' });
             spinner.className = '';
             isGenerating = true;
             isUserScrolled = false;
@@ -840,7 +852,6 @@ $baseUploadUrl = '/chatpdf/uploads/';
                 const llmResponse = document.createElement('div');
                 llmResponse.className = 'message llm-response';
                 chatBox.appendChild(llmResponse);
-                llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' });
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let fullResponse = '';

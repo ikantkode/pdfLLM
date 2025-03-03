@@ -26,13 +26,9 @@ The world is filled with data, but comprehension remains a challenge for many. T
 
 #### Known Issues
 
-As of 03/01/2025
-
-1. "Loading" button appears next to the send button but has not been optimized yet.
-2. Some PDFs requiring OCR may return gibberish text. The system uses Tesseract OCR, and the LLM attempts to correct broken words.
-3. Future improvements may involve implementing embedding for better search and retrieval.
-4. The mobile version is currently non-functional (~40% fixed as of 11:00 PM).
-5. "Preview" button in index.php under "My PDFs" is under development.
+1. The gibberish return is a result of poor vectorization. Embedding is required to have comprehensive answer.
+2. Current system is only able to answer basic questions off plain text PDFs. I am implementing embedding now (03/02/2025 - 8:53 PM)
+3. Embedding is going to be affecting the core ability of this system. I am not sure how far with zero coding knowledge I can go, but here we go.
 
 As of 03/02/2025
 
