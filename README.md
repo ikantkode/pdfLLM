@@ -40,10 +40,6 @@ The world is filled with data, but comprehension remains a challenge for many. T
 1. I like the DeepSeek's Thinking Approach, so I have independentally thought of and begun implementation of "Grammar Check". The idea is, it is going to stream a response and then grammar check, then give the response again. We will have the same approach as R1 where you have a think bubble and then the actual answer - except it will all be context based.
 2. This will make 2 API calls, but at least it will fix the broken words. Today, I understand why PDFs are so yucky. It does not even make sense that this format is alive. The world should just switch to markdown /s (seriously sarcasm, I know PDFs are king in some areas and I wouldn't replace them).
 
-As of 03/02/2025
-
-Upon further exploration, the current implementation functions as a lightweight RAG (Retrieval-Augmented Generation) system with semantic search. Embedding models will enhance functionality.
-
 #### Roadmap
 
 pdfLLM will remain open-source. A demo version will be hosted for broader accessibility.
