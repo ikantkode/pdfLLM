@@ -1,4 +1,4 @@
-# pdfLLM - Local PDF Chat Powered by LLMs
+# pdfLLM - Chat with your PDFs using Ollama
 
 ### About pdfLLM
 
@@ -24,11 +24,21 @@ The world is filled with data, but comprehension remains a challenge for many. T
 3. Improved UI for a better user experience.
 4. PDF preview functionality now opens in a new tab.
 
+#### 03/04/2025
+
+1. Now able to use embedding model (mxbai-embed-large:latest) - currently hard coded.
+2. We (Grok & I), tried to refine the OCR Scanning and Text Extractions. Honestly tried so hard, but we can only get like 90% accuracy.
+
 #### Known Issues
 
-1. The gibberish return is a result of poor vectorization. Embedding is required to have comprehensive answer.
-2. Current system is only able to answer basic questions off plain text PDFs. I am implementing embedding now (03/02/2025 - 8:53 PM)
-3. Embedding is going to be affecting the core ability of this system. I am not sure how far with zero coding knowledge I can go, but here we go.
+1. Some answers are still not very accurate. But I am not giving up.
+2. Grammar errors. I am trying to figure out whether this is an OCR/Text Extraction issue or LLM Hallucination issue. 
+3. I noticed the hallucination because I switched from mistral:7b-instruct-v0.3-q4_0 to llama3.2:3b - and immediately felt the difference. Our system prompt is pretty strict, but things still slip.
+
+#### Thoughts
+
+1. I like the DeepSeek's Thinking Approach, so I have independentally thought of and begun implementation of "Grammar Check". The idea is, it is going to stream a response and then grammar check, then give the response again. We will have the same approach as R1 where you have a think bubble and then the actual answer - except it will all be context based.
+2. This will make 2 API calls, but at least it will fix the broken words. Today, I understand why PDFs are so yucky. It does not even make sense that this format is alive. The world should just switch to markdown /s (seriously sarcasm, I know PDFs are king in some areas and I wouldn't replace them).
 
 As of 03/02/2025
 
@@ -41,12 +51,12 @@ pdfLLM will remain open-source. A demo version will be hosted for broader access
 ##### Upcoming Milestones:
 
 1. Migrate from Core PHP to a lightweight, easy-to-follow framework.
-2. Implement embeddings for improved search and retrieval.
+2. Implement embeddings for improved search and retrieval. - done 03/04/2025 - I worked on this all day and thought, why did i not do anything on 03/03/2025 - its 1:20 AM lol.
 3. Enable users to integrate their own API keys (OpenAI, DeepSeek, etc.).
 4. Develop an API system.
 5. Build a Flutter-based mobile app for iOS and Android.
-6. Explore the Sesame project and integrate advanced features when appropriate.
-7. Implement continuous voice-chat functionality for interacting with personal data.
+6. Explore the Sesame project and integrate advanced features when it is released..
+7. Implement continuous voice-chat functionality for interacting with personal data/PDFs/other formats in the future pls?
 
 
 # Prerequisites:
@@ -67,13 +77,14 @@ pdfLLM will remain open-source. A demo version will be hosted for broader access
 7. Create the database: CREATE DATABASE chatpdf;
 8. Import schema: Copy and paste the contents of setupdb.txt into pgAdmin4's SQL editor and execute.
 9. Set up environment variables in db.php.
-10. sudo apt install poppler-utils (this is for pdftotext)
 
 # Usage Guide
 
 #### Initial Setup
 
 Note: Admin Account: First registered user automatically becomes an admin.
+
+1. sudo apt install poppler-utils (this is for pdftotext)
 #### Uploading Files:
 
 - Local uploads are stored in /uploads.
