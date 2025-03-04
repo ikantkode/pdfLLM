@@ -67,6 +67,7 @@ pdfLLM will remain open-source. A demo version will be hosted for broader access
 7. Create the database: CREATE DATABASE chatpdf;
 8. Import schema: Copy and paste the contents of setupdb.txt into pgAdmin4's SQL editor and execute.
 9. Set up environment variables in db.php.
+10. sudo apt install poppler-utils (this is for pdftotext)
 
 # Usage Guide
 

@@ -806,98 +806,119 @@ $baseUploadUrl = '/chatpdf/uploads/';
         }
 
         async function sendMessage() {
-            if (selectedPdfIds.length === 0) {
-                alert('Please select at least one PDF to chat with.');
-                return;
-            }
-            const input = document.getElementById('user-input').value;
-            if (!input.trim()) return;
-            const mode = document.getElementById('chat-mode').value;
-            const chatBox = document.getElementById('chat-box');
-            const spinner = document.getElementById('spinner');
+    if (selectedPdfIds.length === 0) {
+        alert('Please select at least one PDF to chat with.');
+        return;
+    }
+    const input = document.getElementById('user-input').value;
+    if (!input.trim()) return;
+    const mode = document.getElementById('chat-mode').value;
+    const chatBox = document.getElementById('chat-box');
+    const spinner = document.getElementById('spinner');
 
-            const now = new Date();
-            const timestamp = now.toLocaleString('en-US', {
-                hour: '2-digit',
-                minute: '2-digit',
-                month: '2-digit',
-                day: '2-digit',
-                year: 'numeric',
-                hour12: true
-            }).replace(',', '');
-            chatBox.innerHTML += `
-                <div class="message user-message">
-                    ${input}
-                    <div class="timestamp">${timestamp}</div>
-                </div>`;
-            chatBox.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'end' });
-            spinner.className = '';
-            isGenerating = true;
-            isUserScrolled = false;
+    const now = new Date();
+    const timestamp = now.toLocaleString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        month: '2-digit',
+        day: '2-digit',
+        year: 'numeric',
+        hour12: true
+    }).replace(',', '');
+    chatBox.innerHTML += `
+        <div class="message user-message">
+            ${input}
+            <div class="timestamp">${timestamp}</div>
+        </div>`;
+    chatBox.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    spinner.className = '';
+    isGenerating = true;
+    isUserScrolled = false;
 
-            const formData = new FormData();
-            formData.append('message', input);
-            formData.append('pdf_ids', selectedPdfIds.join(','));
-            formData.append('mode', mode);
-            formData.append('chat_id', currentChatId);
+    try {
+        // Embed via proxy
+        const embedResponse = await fetch('proxy.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: 'mxbai-embed-large:latest', prompt: input })
+        });
+        if (!embedResponse.ok) throw new Error('Embedding fetch failed: ' + embedResponse.statusText);
+        const embedData = await embedResponse.json();
+        console.log('Embedding:', embedData); // Debug
+        const queryEmbedding = embedData.embedding;
 
-            try {
-                const response = await fetch('chat.php', {
-                    method: 'POST',
-                    body: formData
-                });
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const llmResponse = document.createElement('div');
-                llmResponse.className = 'message llm-response';
-                chatBox.appendChild(llmResponse);
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let fullResponse = '';
+        // Fetch context
+        const contextResponse = await fetch('get_context.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: `query_embedding=${encodeURIComponent(JSON.stringify(queryEmbedding))}&pdf_ids=${selectedPdfIds.join(',')}`
+        });
+        const contextData = await contextResponse.json();
+        console.log('Context:', contextData); // Debug
+        const context = contextData.context || '';
 
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    const chunk = decoder.decode(value, { stream: true });
-                    const lines = chunk.split('\n');
-                    for (const line of lines) {
-                        if (line.startsWith('data: ')) {
-                            const data = JSON.parse(line.substring(6));
-                            if (data.response) {
-                                fullResponse += data.response;
-                                llmResponse.innerHTML = formatResponse(fullResponse) + `<div class="timestamp">${timestamp}</div>`;
-                                if (!isUserScrolled) {
-                                    llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' });
-                                }
-                            } else if (data.error) {
-                                llmResponse.innerHTML = `Error: ${data.error}<div class="timestamp">${timestamp}</div>`;
-                                llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' });
-                                break;
-                            }
+        const formData = new FormData();
+        formData.append('message', input);
+        formData.append('pdf_ids', selectedPdfIds.join(','));
+        formData.append('mode', mode);
+        formData.append('chat_id', currentChatId);
+        formData.append('context', context);
+
+        const response = await fetch('chat.php', {
+            method: 'POST',
+            body: formData
+        });
+        if (!response.ok) throw new Error(`Chat fetch failed: ${response.statusText}`);
+        const llmResponse = document.createElement('div');
+        llmResponse.className = 'message llm-response';
+        chatBox.appendChild(llmResponse);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let fullResponse = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = decoder.decode(value, { stream: true });
+            console.log('Chunk:', chunk); // Debug
+            const lines = chunk.split('\n');
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    const data = JSON.parse(line.substring(6));
+                    if (data.response) {
+                        fullResponse += data.response;
+                        llmResponse.innerHTML = formatResponse(fullResponse) + `<div class="timestamp">${timestamp}</div>`;
+                        if (!isUserScrolled) {
+                            llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' });
                         }
+                    } else if (data.error) {
+                        llmResponse.innerHTML = `Error: ${data.error}<div class="timestamp">${timestamp}</div>`;
+                        llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                        break;
                     }
                 }
-                saveChatContext();
-                if (mode === 'mixed') {
-                    const formData = new FormData();
-                    formData.append('chat_mode', 'mixed');
-                    await fetch('save_context.php', { method: 'POST', body: formData });
-                }
-            } catch (e) {
-                console.error('Send message fetch error:', e);
-                const llmResponse = document.createElement('div');
-                llmResponse.className = 'message llm-response';
-                llmResponse.innerHTML = `Error: Failed to connect to the server.<div class="timestamp">${timestamp}</div>`;
-                chatBox.appendChild(llmResponse);
-                llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' });
             }
-
-            spinner.className = 'is-hidden';
-            document.getElementById('user-input').value = '';
-            isGenerating = false;
-            updateScrollButton();
         }
+        saveChatContext();
+        if (mode === 'mixed') {
+            const formData = new FormData();
+            formData.append('chat_mode', 'mixed');
+            await fetch('save_context.php', { method: 'POST', body: formData });
+        }
+    } catch (e) {
+        console.error('Send message error:', e);
+        const llmResponse = document.createElement('div');
+        llmResponse.className = 'message llm-response';
+        llmResponse.innerHTML = `Error: ${e.message}<div class="timestamp">${timestamp}</div>`;
+        chatBox.appendChild(llmResponse);
+        llmResponse.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+
+    spinner.className = 'is-hidden';
+    document.getElementById('user-input').value = '';
+    isGenerating = false;
+    updateScrollButton();
+}
 
         function updateScrollButton() {
             const chatBox = document.getElementById('chat-box');

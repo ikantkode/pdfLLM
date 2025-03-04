@@ -26,7 +26,7 @@ error_log("Processing request for user_id: $userId, POST: " . json_encode($_POST
 try {
     $stmt = $pdo->prepare("SELECT value FROM settings WHERE key = 'ollama_model' LIMIT 1");
     $stmt->execute();
-    $currentModel = $stmt->fetchColumn() ?: 'mistral:7b-instruct-v0.3-q4_0';
+    $currentModel = $stmt->fetchColumn() ?: 'llama3.2:3b'; // Updated to llama3.2:3b
     error_log("Current Ollama Model: $currentModel");
 } catch (Exception $e) {
     error_log("Error fetching model: " . $e->getMessage());
@@ -126,7 +126,7 @@ if (isset($_POST['fetch_chat'])) {
 if (isset($_POST['load_chat'])) {
     $chatId = $_POST['load_chat'];
     try {
-        $stmt = $pdo->prepare("SELECT user_message, llm_response, pdf_ids FROM chat_messages WHERE chat_id = ? AND user_id = ? ORDER BY created_at");
+        $stmt = $pdo->prepare("SELECT user_message, llm_response, pdf_ids, created_at FROM chat_messages WHERE chat_id = ? AND user_id = ? ORDER BY created_at");
         $stmt->execute([$chatId, $userId]);
         $messages = $stmt->fetchAll(PDO::FETCH_ASSOC);
         error_log("Loaded chat $chatId for user $userId: " . json_encode($messages));
@@ -137,32 +137,14 @@ if (isset($_POST['load_chat'])) {
     }
     exit;
 }
-
 if (isset($_POST['message']) && isset($_POST['pdf_ids'])) {
     $pdfIds = explode(',', $_POST['pdf_ids']);
-    $placeholders = implode(',', array_fill(0, count($pdfIds), '?'));
-    try {
-        $stmt = $pdo->prepare("SELECT extracted_text FROM pdfs WHERE id IN ($placeholders) AND user_id = ?");
-        $stmt->execute(array_merge($pdfIds, [$userId]));
-        $texts = $stmt->fetchAll(PDO::FETCH_COLUMN);
-        error_log("Fetched texts for PDFs: " . json_encode($pdfIds));
-    } catch (Exception $e) {
-        error_log("PDF text fetch error: " . $e->getMessage());
-        echo "data: " . json_encode(['success' => false, 'error' => 'Failed to fetch PDFs: ' . $e->getMessage()]) . "\n\n";
-        exit;
-    }
+    $context = $_POST['context'] ?? '';
 
-    if (empty($texts)) {
-        error_log("No valid PDFs found for IDs: " . json_encode($pdfIds));
-        echo "data: " . json_encode(['success' => false, 'error' => 'No valid PDFs found']) . "\n\n";
-        exit;
-    }
-
-    $combinedText = implode("\n\n---\n\n", $texts);
     $mode = $_POST['mode'] ?? 'pdf-only';
     $prompt = $mode === 'pdf-only'
-        ? "Based solely on the content of these PDFs: \"{$combinedText}\"\n\nUser asked: \"{$_POST['message']}\"\n\nProvide a response using only the PDF content, without adding external knowledge."
-        : "Based on the content of these PDFs: \"{$combinedText}\"\n\nUser asked: \"{$_POST['message']}\"\n\nProvide a helpful response combining information from the PDFs with your general knowledge. If the grammer or words are broken/incomplete, use your best guess at the word and do not tell the user you did so.";
+        ? "Based solely on this PDF content: \"{$context}\"\n\nUser asked: \"{$_POST['message']}\"\n\nProvide a response using only the PDF content, without adding external knowledge."
+        : "Based on this PDF content: \"{$context}\"\n\nUser asked: \"{$_POST['message']}\"\n\nProvide a helpful response combining information from the PDFs with your general knowledge. If grammar or words are broken or incomplete, use your best guess silently.";
 
     $chatId = $_POST['chat_id'];
     if (!$chatId) {
@@ -178,7 +160,8 @@ if (isset($_POST['message']) && isset($_POST['pdf_ids'])) {
 
     $client = new Client();
     try {
-        $response = $client->post('http://192.168.0.101:11434/api/generate', [
+        // First Pass: Stream raw response
+        $response = $client->post('http://localhost:11434/api/generate', [
             'json' => [
                 'model' => $currentModel,
                 'prompt' => "[INST] {$prompt} [/INST]",
@@ -189,7 +172,7 @@ if (isset($_POST['message']) && isset($_POST['pdf_ids'])) {
         ]);
 
         $stream = $response->getBody();
-        $fullResponse = '';
+        $rawResponse = '';
         while (!$stream->eof()) {
             $chunk = $stream->read(1024);
             $lines = explode("\n", $chunk);
@@ -197,11 +180,11 @@ if (isset($_POST['message']) && isset($_POST['pdf_ids'])) {
                 if (trim($line)) {
                     $data = json_decode($line, true);
                     if (isset($data['response'])) {
-                        $fullResponse .= $data['response'];
-                        echo "data: " . json_encode(['response' => $data['response']]) . "\n\n";
+                        $rawResponse .= $data['response'];
+                        echo "data: " . json_encode(['response' => $data['response'], 'type' => 'raw']) . "\n\n";
                         flush();
                     } elseif (isset($data['error'])) {
-                        echo "data: " . json_encode(['error' => $data['error']]) . "\n\n";
+                        echo "data: " . json_encode(['error' => $data['error'], 'type' => 'raw']) . "\n\n";
                         flush();
                         exit;
                     }
@@ -209,10 +192,45 @@ if (isset($_POST['message']) && isset($_POST['pdf_ids'])) {
             }
         }
         $stream->close();
+        error_log("Raw response for message $messageId: " . $rawResponse);
+
+        // Second Pass: Refine response
+        $refinePrompt = "Refine this response for proper grammar, spelling, and punctuation, preserving all names and numbers exactly as they appear: \"$rawResponse\"";
+        $refineResponse = $client->post('http://localhost:11434/api/generate', [
+            'json' => [
+                'model' => $currentModel,
+                'prompt' => "[INST] {$refinePrompt} [/INST]",
+                'stream' => true
+            ],
+            'timeout' => 120,
+            'stream' => true
+        ]);
+
+        $refinedStream = $refineResponse->getBody();
+        $refinedResponse = '';
+        while (!$refinedStream->eof()) {
+            $chunk = $refinedStream->read(1024);
+            $lines = explode("\n", $chunk);
+            foreach ($lines as $line) {
+                if (trim($line)) {
+                    $data = json_decode($line, true);
+                    if (isset($data['response'])) {
+                        $refinedResponse .= $data['response'];
+                        echo "data: " . json_encode(['response' => $data['response'], 'type' => 'refined']) . "\n\n";
+                        flush();
+                    } elseif (isset($data['error'])) {
+                        echo "data: " . json_encode(['error' => $data['error'], 'type' => 'refined']) . "\n\n";
+                        flush();
+                        exit;
+                    }
+                }
+            }
+        }
+        $refinedStream->close();
 
         $stmt = $pdo->prepare("UPDATE chat_messages SET llm_response = ? WHERE id = ? AND user_id = ?");
-        $stmt->execute([$fullResponse, $messageId, $userId]);
-        error_log("Saved LLM response for message $messageId: " . $fullResponse);
+        $stmt->execute([$refinedResponse, $messageId, $userId]);
+        error_log("Refined response saved for message $messageId: " . $refinedResponse);
     } catch (Exception $e) {
         error_log("Ollama request error: " . $e->getMessage());
         echo "data: " . json_encode(['error' => 'Failed to get response from Ollama: ' . $e->getMessage()]) . "\n\n";
