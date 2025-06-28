@@ -1,0 +1,8 @@
+# Ignore environment variables file
+.env
+
+# Ignore other common stuff you might want to exclude
+/vendor/
+/node_modules/
+*.log
+.DS_Store
