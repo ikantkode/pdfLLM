@@ -317,7 +317,6 @@ The Streamlit interface (`http://localhost:8501`) provides:
 
 ## Contributing
 - Report issues or suggest features via the repository’s issue tracker.
-- To fix PDF headings, share `app/converters/pdf_converter.py` for targeted improvements.
 
 ## License
-MIT License (or specify your preferred license).
+MIT License
