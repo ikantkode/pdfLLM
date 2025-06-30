@@ -24,7 +24,15 @@
 - **Debug Interface**: Inspects file metadata and Qdrant chunks via `?page=debug&file_id=<uuid>`.
 
 ## Semantic and Graph Search
-... (truncated for brevity, see original content)
+- **Semantic Search**:
+  - **Mechanism**: Uses OpenAI’s `text-embedding-3-small` to generate 1536-dimensional embeddings for document chunks and queries. Qdrant performs cosine similarity searches to retrieve the top `limit` (default 5) chunks.
+  - **Implementation**: The `qdrant_handler.py` `search_entities` method filters chunks by `user_id`, `file_id` (optional), and entities, combining vector search results with `rank_results` in `main.py`.
+  - **Example**: Querying “What is the requisition amount for PS 54X?” retrieves chunks containing “CURRENT PAYMENT DUE: $29,825.80” based on semantic similarity.
+- **Graph-Based Search**:
+  - **Mechanism**: Extracts entities (e.g., “Varsity Plumbing and Heating, Inc.”) and relationships (e.g., “appears_in”) using Spacy (`en_core_web_sm`) in `text_processor.py`. Stores them in a `networkx` graph (`knowledge_graph.json`) and Qdrant payloads.
+  - **Implementation**: The `/search` endpoint in `main.py` uses `search_documents` to combine vector search with entity-based filtering via `qdrant_handler.search_entities`. The knowledge graph enhances queries targeting entities or relationships.
+  - **Example**: Querying “Who is the subcontractor for PS 54X?” retrieves chunks linked to “Varsity Plumbing and Heating, Inc.” via the “appears_in” relationship.
+- **Hybrid Approach**: Combines semantic and graph search results in `rank_results`, prioritizing chunks with high similarity and relevant entities/relationships.
 
 ## License
 MIT License
