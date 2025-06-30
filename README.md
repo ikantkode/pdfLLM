@@ -4,7 +4,7 @@
 
 ## Overview
 
-`pdfLLM` is a hybrid RAG application that combines **semantic search** (vector-based similarity) with **graph-based search** (entity-relationship traversal) to provide accurate and contextually relevant answers. It processes uploaded documents, extracts text, identifies entities and relationships, and stores them in Qdrant and a `networkx`-based knowledge graph. Users can interact via a web UI or API, uploading files, querying document content, and debugging stored data. The system is designed for s...
+`pdfLLM` is a hybrid RAG application that combines **semantic search** (vector-based similarity) with **graph-based search** (entity-relationship traversal) to provide accurate and contextually relevant answers. It processes uploaded documents, extracts text, identifies entities and relationships, and stores them in Qdrant and a `networkx`-based knowledge graph. Users can interact via a web UI or API, uploading files, querying document content, and debugging stored data.
 
 ## Deployment
 
