@@ -1,10 +1,21 @@
 # pdfLLM
 
-`pdfLLM` is a Retrieval-Augmented Generation (RAG) microservice designed for processing, storing, and querying documents such as PDFs, text files, Word documents, spreadsheets, and images. It leverages a FastAPI backend for programmatic access, a Streamlit frontend for interactive use, and a Qdrant vector database for efficient retrieval. Documents are converted to markdown, chunked, and embedded using OpenAI’s `text-embedding-3-small` model, with entities and relationships indexed in a knowledge grap...
+`pdfLLM` is a Retrieval-Augmented Generation (RAG) microservice designed for processing, storing, and querying documents such as PDFs, text files, Word documents, spreadsheets, and images. It leverages a FastAPI backend for programmatic access, a Streamlit frontend for interactive use, and a Qdrant vector database for efficient retrieval. Documents are converted to markdown, chunked, and embedded using OpenAI’s `text-embedding-3-small` model, with entities and relationships indexed in a knowledge graph.
 
 ## Overview
 
 `pdfLLM` is a hybrid RAG application that combines **semantic search** (vector-based similarity) with **graph-based search** (entity-relationship traversal) to provide accurate and contextually relevant answers. It processes uploaded documents, extracts text, identifies entities and relationships, and stores them in Qdrant and a `networkx`-based knowledge graph. Users can interact via a web UI or API, uploading files, querying document content, and debugging stored data.
+
+## Road Map
+
+- Implement Arango for Graphs.
+- Ollama Integration for Local Models Usage
+- Different LLM & Embedding Model Configurations
+  - LLM inference via DeepSeek API
+  - LLM inference via Grok
+  - LLM inference via Lambda.ai
+  - Embedding model choices:
+    - Ollama or OpenAI (I am not aware of any other hosted embedding model options other than on the run via HF, NOT implementing that.)
 
 ## Deployment
 
