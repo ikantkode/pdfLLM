@@ -1,10 +1,23 @@
 # pdfLLM
 
-`pdfLLM` is a Retrieval-Augmented Generation (RAG) microservice designed for processing, storing, and querying documents such as PDFs, text files, Word documents, spreadsheets, and images. It leverages a FastAPI backend for programmatic access, a Streamlit frontend for interactive use, and a Qdrant vector database for efficient retrieval. Documents are converted to markdown, chunked, and embedded using OpenAI’s `text-embedding-3-small` model, with entities and relationships indexed in a knowledge graph. The system supports semantic search for context-based retrieval and graph-based search for entity-relationship queries, enabling precise and context-aware responses using OpenAI’s `gpt-4o` model.
+`pdfLLM` is a Retrieval-Augmented Generation (RAG) microservice designed for processing, storing, and querying documents such as PDFs, text files, Word documents, spreadsheets, and images. It leverages a FastAPI backend for programmatic access, a Streamlit frontend for interactive use, and a Qdrant vector database for efficient retrieval. Documents are converted to markdown, chunked, and embedded using OpenAI’s `text-embedding-3-small` model, with entities and relationships indexed in a knowledge grap...
 
 ## Overview
 
-`pdfLLM` is a hybrid RAG application that combines **semantic search** (vector-based similarity) with **graph-based search** (entity-relationship traversal) to provide accurate and contextually relevant answers. It processes uploaded documents, extracts text, identifies entities and relationships, and stores them in Qdrant and a `networkx`-based knowledge graph. Users can interact via a web UI or API, uploading files, querying document content, and debugging stored data. The system is designed for scalability, persistence, and cross-service state sharing, making it suitable for document-heavy workflows like project management, legal analysis, or research.
+`pdfLLM` is a hybrid RAG application that combines **semantic search** (vector-based similarity) with **graph-based search** (entity-relationship traversal) to provide accurate and contextually relevant answers. It processes uploaded documents, extracts text, identifies entities and relationships, and stores them in Qdrant and a `networkx`-based knowledge graph. Users can interact via a web UI or API, uploading files, querying document content, and debugging stored data. The system is designed for s...
+
+## Deployment
+
+```bash
+git clone https://github.com/ikantkode/pdfLLM.git
+cd pdfLLM
+mv env_example .env
+# Put your OpenAI key in .env
+docker compose up -d --build
+```
+
+- Visit **http://localhost:8501** for the Streamlit web interface.
+- View `api_docs.md` for more information on using the FastAPI endpoints.
 
 ### Type of RAG Application
 - **Retrieval-Augmented Generation**: Combines retrieval (fetching relevant document chunks) with generation (producing natural language responses using OpenAI’s `gpt-4o`).
