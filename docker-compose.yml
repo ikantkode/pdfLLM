@@ -1,43 +1,36 @@
 version: '3.8'
-
 services:
   rag-service:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
     volumes:
       - ./app:/app
-      - ./app/data:/app/data
+      - ./data:/app/data
+      - ./data/logs:/app/data/logs
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
       - qdrant
-    command: uvicorn main:app --host 0.0.0.0 --port 8000
-
   streamlit-service:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
+    command: streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0
     ports:
       - "8501:8501"
     volumes:
       - ./app:/app
-      - ./app/data:/app/data
+      - ./data:/app/data
+      - ./data/logs:/app/data/logs
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
-      - qdrant
-    command: streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0
-
+      - rag-service
   qdrant:
-    image: qdrant/qdrant:v1.12.0
+    image: qdrant/qdrant:latest
     ports:
       - "6333:6333"
     volumes:
-      - qdrant-data:/qdrant/storage
-
+      - pdfllm_qdrant-data:/qdrant/storage
 volumes:
-  qdrant-data:
-  app-data:
+  pdfllm_qdrant-data:

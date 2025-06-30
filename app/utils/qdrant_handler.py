@@ -1,69 +1,126 @@
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import PointStruct, VectorParams, Distance, Filter, FieldCondition, MatchValue
-import uuid
 import logging
+from typing import List, Dict, Any, Optional
+import uuid
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import PointStruct, Filter, FieldCondition, MatchValue
+from config import settings
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class QdrantHandler:
-    def __init__(self, host="qdrant", port=6333, collection_name="rag_chunks"):
-        self.client = QdrantClient(host=host, port=port)
-        self.collection_name = collection_name
+    def __init__(self, host: str, port: int, collection_name: str):
         try:
-            self.create_collection()
+            self.client = QdrantClient(host=host, port=port)
+            self.collection_name = collection_name
+            self._initialize_collection()
         except Exception as e:
-            logger.error(f"Failed to create Qdrant collection: {str(e)}")
+            logger.error(f"Failed to initialize Qdrant client: {str(e)}")
             raise
 
-    def create_collection(self):
+    def _initialize_collection(self):
+        """Initialize Qdrant collection with vector and payload indexes"""
         try:
             collections = self.client.get_collections()
             if self.collection_name not in [c.name for c in collections.collections]:
                 self.client.create_collection(
                     collection_name=self.collection_name,
-                    vectors_config=VectorParams(
-                        size=1536,  # Dimension for text-embedding-3-small
-                        distance=Distance.COSINE
-                    )
+                    vectors_config={"size": 1536, "distance": "Cosine"}
                 )
-                logger.info(f"Created Qdrant collection: {self.collection_name}")
+                logger.info(f"Created collection: {self.collection_name}")
+                
+                # Create payload indexes for efficient filtering
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name="user_id",
+                    field_schema="keyword"
+                )
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name="document_id",
+                    field_schema="keyword"
+                )
+                logger.info("Created payload indexes")
         except Exception as e:
-            logger.error(f"Error creating Qdrant collection: {str(e)}")
+            logger.error(f"Failed to initialize collection: {str(e)}")
             raise
 
-    def save_chunk(self, chunk_data, user_id):
+    async def save_chunk(self, chunk: Dict, user_id: str):
+        """Save a chunk to Qdrant"""
         try:
             point = PointStruct(
-                id=chunk_data['chunk_id'],
-                vector=chunk_data['embedding'],
+                id=str(uuid.uuid4()),
+                vector=chunk['embedding'],
                 payload={
-                    "document_id": chunk_data['document_id'],
-                    "content": chunk_data['content'],
-                    "parent_section": chunk_data['parent_section'],
-                    "chunk_index": chunk_data['chunk_index'],
-                    "user_id": user_id
+                    "user_id": user_id,
+                    "document_id": chunk['document_id'],
+                    "content": chunk['content'],
+                    "chunk_index": chunk['chunk_index'],
+                    "parent_section": chunk['parent_section'],
+                    "entities": chunk['entities'],
+                    "relationships": chunk['relationships']
                 }
             )
             self.client.upsert(
                 collection_name=self.collection_name,
-                points=[point]
+                points=[point],
+                wait=True
             )
-            logger.info(f"Saved chunk {chunk_data['chunk_id']} to Qdrant")
+            logger.debug(f"Saved chunk {chunk['chunk_index']} for document {chunk['document_id']}")
         except Exception as e:
-            logger.error(f"Failed to save chunk {chunk_data['chunk_id']}: {str(e)}")
+            logger.error(f"Failed to save chunk: {str(e)}")
             raise
 
-    def delete_by_document_id(self, document_id):
+    async def search_entities(self, entities: List[str], user_id: str, file_id: Optional[str] = None, limit: int = 5) -> List[Any]:
+        """Search for chunks containing specific entities"""
+        try:
+            results = []
+            for entity in entities:
+                filter_conditions = [
+                    FieldCondition(
+                        key="entities",
+                        match=MatchValue(value=entity)
+                    ),
+                    FieldCondition(
+                        key="user_id",
+                        match=MatchValue(value=user_id)
+                    )
+                ]
+                if file_id:
+                    filter_conditions.append(
+                        FieldCondition(
+                            key="document_id",
+                            match=MatchValue(value=file_id)
+                        )
+                    )
+
+                search_results = self.client.search(
+                    collection_name=self.collection_name,
+                    query_filter=Filter(must=filter_conditions),
+                    limit=limit,
+                    with_vectors=False
+                )
+                results.extend(search_results)
+            return results
+        except Exception as e:
+            logger.error(f"Entity search failed: {str(e)}")
+            return []
+
+    async def delete_by_document_id(self, document_id: str):
+        """Delete all chunks associated with a document ID"""
         try:
             self.client.delete(
                 collection_name=self.collection_name,
                 points_selector=Filter(
-                    must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))]
-                )
+                    must=[
+                        FieldCondition(
+                            key="document_id",
+                            match=MatchValue(value=document_id)
+                        )
+                    ]
+                ),
+                wait=True
             )
-            logger.info(f"Deleted chunks for document_id: {document_id}")
+            logger.info(f"Deleted all chunks for document {document_id}")
         except Exception as e:
-            logger.error(f"Failed to delete chunks for document_id {document_id}: {str(e)}")
+            logger.error(f"Failed to delete chunks for document {document_id}: {str(e)}")
             raise

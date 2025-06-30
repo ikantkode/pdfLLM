@@ -2,24 +2,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies for libmagic, pdf2image, and pytesseract
 RUN apt-get update && apt-get install -y \
-    tesseract-ocr \
-    libtesseract-dev \
+    libmagic-dev \
     poppler-utils \
-    libreoffice \
-    libmagic1 \
+    tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m spacy download en_core_web_sm
 
-# Copy application code
-COPY app/ .
-
-# Expose ports for FastAPI and Streamlit
-EXPOSE 8000 8501
-
-# Default command (overridden by docker-compose)
-CMD ["bash"]
+COPY app/ /app/
