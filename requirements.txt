@@ -36,3 +36,6 @@ pydantic-settings==2.5.2
 # Runtime dependencies
 python-dateutil==2.9.0.post0
 typing-extensions==4.11.0
+
+# Graph Visualization
+pyvis==0.3.2

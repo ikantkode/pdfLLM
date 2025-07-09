@@ -11,6 +11,8 @@ from io import BytesIO
 from typing import Dict, List, Optional
 from pathlib import Path
 from config import settings
+from pyvis.network import Network
+import streamlit.components.v1 as components
 
 # Set up logging
 Path(settings.data_dir).joinpath("logs").mkdir(parents=True, exist_ok=True)
@@ -45,7 +47,7 @@ class SessionState:
             st.session_state.selected_docs = []
         if "upload_key" not in st.session_state:
             st.session_state.upload_key = 0
-            
+
         self.load()
 
     def save(self):
@@ -125,11 +127,11 @@ def update_selected_docs(file_id: str):
 def render_document_management(user_id: str):
     """Render the document management sidebar"""
     st.sidebar.title("Document Management")
-    
+
     # File upload section
     with st.sidebar.expander("Upload Documents", expanded=True):
-        uploaded_file = st.file_uploader(
-            "Upload a file",
+        uploaded_files = st.file_uploader(
+            "Upload files",
             type=(
                 settings.supported_extensions['images'] +
                 settings.supported_extensions['documents'] +
@@ -137,47 +139,56 @@ def render_document_management(user_id: str):
                 settings.supported_extensions['pdfs'] +
                 settings.supported_extensions['text']
             ),
-            accept_multiple_files=False,
+            accept_multiple_files=True,
             key=f"file_uploader_{st.session_state.upload_key}"
         )
 
-        if uploaded_file and not st.session_state.get("upload_trigger", False):
-            if uploaded_file.size > settings.max_document_size:
-                st.error(f"File size exceeds {settings.max_document_size//(1024*1024)}MB limit")
-            else:
-                st.session_state.upload_trigger = True
-                files = {"file": (uploaded_file.name, uploaded_file, uploaded_file.type)}
-                data = {"user_id": user_id}
-                try:
-                    with st.spinner("Processing file..."):
+        if uploaded_files and not st.session_state.get("upload_trigger", False):
+            st.session_state.upload_trigger = True
+            success_count = 0
+            error_messages = []
+            with st.spinner("Processing files..."):
+                for uploaded_file in uploaded_files:
+                    if uploaded_file.size > settings.max_document_size:
+                        error_messages.append(f"File {uploaded_file.name} exceeds {settings.max_document_size//(1024*1024)}MB limit")
+                        continue
+
+                    files = {"file": (uploaded_file.name, uploaded_file, uploaded_file.type)}
+                    data = {"user_id": user_id}
+                    try:
                         response = requests.post(
                             "http://rag-service:8000/process_file",
                             files=files,
                             data=data,
                             headers={"X-API-Key": settings.openai_api_key}
                         )
-                    if response.status_code == 200:
-                        result = response.json()
-                        st.session_state.file_metadata.append({
-                            "file_id": result["file_id"],
-                            "filename": result["filename"],
-                            "file_type": os.path.splitext(result["filename"])[1].lower(),
-                            "upload_date": datetime.datetime.now().isoformat(),
-                            "size": uploaded_file.size,
-                            "content": base64.b64encode(uploaded_file.getvalue()).decode(),
-                            "user_id": user_id
-                        })
-                        st.success(f"File {uploaded_file.name} uploaded successfully!")
-                        st.session_state.upload_key += 1
-                        st.session_state.upload_trigger = False
-                        session_state.save()
-                        st.rerun()
-                    else:
-                        st.error(f"Upload failed: {response.json().get('detail', 'Unknown error')}")
-                        st.session_state.upload_trigger = False
-                except Exception as e:
-                    st.error(f"Upload error: {str(e)}")
-                    st.session_state.upload_trigger = False
+                        if response.status_code == 200:
+                            result = response.json()
+                            st.session_state.file_metadata.append({
+                                "file_id": result["file_id"],
+                                "filename": result["filename"],
+                                "file_type": os.path.splitext(result["filename"])[1].lower(),
+                                "upload_date": datetime.datetime.now().isoformat(),
+                                "size": uploaded_file.size,
+                                "content": base64.b64encode(uploaded_file.getvalue()).decode(),
+                                "user_id": user_id
+                            })
+                            success_count += 1
+                            logger.info(f"Uploaded file: {uploaded_file.name}")
+                        else:
+                            error_messages.append(f"Upload failed for {uploaded_file.name}: {response.json().get('detail', 'Unknown error')}")
+                    except Exception as e:
+                        error_messages.append(f"Upload error for {uploaded_file.name}: {str(e)}")
+
+            if success_count > 0:
+                st.success(f"Successfully uploaded {success_count} file(s)!")
+                st.session_state.upload_key += 1
+                session_state.save()
+                st.rerun()
+            if error_messages:
+                for error in error_messages:
+                    st.error(error)
+            st.session_state.upload_trigger = False
 
     # Document list
     st.sidebar.markdown("### Uploaded Documents")
@@ -187,7 +198,7 @@ def render_document_management(user_id: str):
                 f"http://rag-service:8000/documents?user_id={user_id}",
                 headers={"X-API-Key": settings.openai_api_key}
             )
-            
+
         if response.status_code == 200:
             documents = response.json().get("documents", [])
             if documents:
@@ -211,7 +222,7 @@ def render_document_management(user_id: str):
                         with cols[2]:
                             st.markdown(
                                 f'<a href="?page=debug&file_id={file["file_id"]}" target="_blank" style="text-decoration: none;">🐞</a>',
-                                unsafe_allow_html=True
+                                    unsafe_allow_html=True
                             )
 
                         # Delete button
@@ -247,14 +258,14 @@ def render_document_management(user_id: str):
 def render_chat_sessions(user_id: str):
     """Render the chat sessions sidebar"""
     st.sidebar.title("Chat Sessions")
-    
+
     if st.sidebar.button("+ New Chat", key="new_chat_button"):
         create_new_chat()
 
     for chat_id, chat_data in st.session_state.chat_sessions.items():
         if chat_data['user_id'] != user_id:
             continue
-            
+
         cols = st.sidebar.columns([4, 1])
         with cols[0]:
             if st.button(
@@ -276,7 +287,7 @@ def render_chat_sessions(user_id: str):
 def render_chat_interface(user_id: str):
     """Render the main chat interface"""
     st.title("RAG Chat Interface")
-    
+
     # Document selection for context
     if st.session_state.file_metadata:
         st.markdown("### Select Documents for Context")
@@ -296,62 +307,63 @@ def render_chat_interface(user_id: str):
     st.markdown("### Chat")
     query = st.text_area("Enter your query", height=100, key="query_input")
 
-    if st.button("Send", key="send_button") and query and user_id:
-        with st.spinner("Processing query..."):
-            try:
-                payload = {
-                    "query": query,
-                    "user_id": user_id,
-                    "file_ids": st.session_state.selected_docs,
-                    "chat_id": st.session_state.current_chat_id
-                }
-                response = requests.post(
-                    "http://rag-service:8000/chat",
-                    data=payload,
-                    headers={"X-API-Key": settings.openai_api_key}
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    answer = clean_response(result["response"])
-                    
-                    # Update chat history
-                    current_chat = st.session_state.chat_sessions.get(st.session_state.current_chat_id, {})
-                    if current_chat:
-                        current_chat['messages'].append({
-                            "role": "user",
-                            "content": query,
-                            "timestamp": datetime.datetime.now().isoformat()
-                        })
-                        current_chat['messages'].append({
-                            "role": "assistant",
-                            "content": answer,
-                            "timestamp": datetime.datetime.now().isoformat()
-                        })
-                        current_chat['updated_at'] = datetime.datetime.now().isoformat()
-                        current_chat['document_ids'] = st.session_state.selected_docs
-                        session_state.save()
-                    
-                    # Display response
-                    st.write(f"**Query**: {query}")
-                    st.write(f"**Response**: {answer}")
-                    
-                    if result.get("sources"):
-                        st.subheader("Sources")
-                        for source in result["sources"]:
-                            relationships = ', '.join([
-                                f"{rel['subject']} {rel['predicate']} {rel['object']}"
-                                for rel in source['relationships']
-                            ]) if source['relationships'] else "None"
-                            st.write(
-                                f"- **{source['filename']}** (Section {source['chunk_index']}): "
-                                f"Entities: {', '.join(source['entities']) if source['entities'] else 'None'}, "
-                                f"Relationships: {relationships}"
-                            )
-                else:
-                    st.error(f"Chat failed: {response.json().get('detail', 'Unknown error')}")
-            except Exception as e:
-                st.error(f"Chat error: {str(e)}")
+    if st.button("Send", key="send_button"):
+        if not query or not user_id or not st.session_state.selected_docs:
+            if not query and not st.session_state.selected_docs:
+                st.error("Please enter a query and select at least one document.")
+            elif not query:
+                st.error("Please enter a query.")
+            elif not st.session_state.selected_docs:
+                st.error("Please select at least one document.")
+        else:
+            with st.spinner("Processing query..."):
+                logger.debug(f"Sending query with file_ids: {st.session_state.selected_docs}")
+                try:
+                    payload = {
+                        "query": query,
+                        "user_id": user_id,
+                        "file_ids": st.session_state.selected_docs,
+                        "chat_id": st.session_state.current_chat_id
+                    }
+                    response = requests.post(
+                        "http://rag-service:8000/chat",
+                        data=payload,
+                        headers={"X-API-Key": settings.openai_api_key}
+                    )
+
+                    if response.status_code == 200:
+                        result = response.json()
+                        answer = clean_response(result["response"])
+
+                        # Update chat history
+                        current_chat = st.session_state.chat_sessions.get(st.session_state.current_chat_id, {})
+                        if current_chat:
+                            current_chat['messages'].append({
+                                "role": "user",
+                                "content": query,
+                                "timestamp": datetime.datetime.now().isoformat()
+                            })
+                            current_chat['messages'].append({
+                                "role": "assistant",
+                                "content": answer,
+                                "timestamp": datetime.datetime.now().isoformat()
+                            })
+                            current_chat['updated_at'] = datetime.datetime.now().isoformat()
+                            current_chat['document_ids'] = st.session_state.selected_docs
+                            session_state.save()
+
+                        # Display response
+                        st.write(f"**Query**: {query}")
+                        st.write(f"**Response**: {answer}")
+
+                        if result.get("sources"):
+                            st.subheader("Sources")
+                            for source in result["sources"]:
+                                st.write(f"- **{source['filename']}** (Section {source['chunk_index']})")
+                    else:
+                        st.error(f"Chat failed: {response.json().get('detail', 'Unknown error')}")
+                except Exception as e:
+                    st.error(f"Chat error: {str(e)}")
 
     # Display chat history
     st.markdown("### Chat History")
@@ -367,31 +379,76 @@ def render_chat_interface(user_id: str):
 
 def clean_response(text: str) -> str:
     """Clean response text for display"""
-    # Remove excessive newlines and whitespace
     text = re.sub(r'\n+', '\n', text).strip()
-    # Remove special characters that might break markdown
     text = re.sub(r'[\*\_\`\#]{2,}', '', text)
     return text
+
+def render_knowledge_graph(user_id: str, file_id: Optional[str] = None):
+    """Render the knowledge graph visualization using pyvis"""
+    logger.info(f"Rendering knowledge graph for user_id={user_id}, file_id={file_id}")
+    st.markdown("### Knowledge Graph")
+    try:
+        with st.spinner("Loading knowledge graph..."):
+            url = f"http://rag-service:8000/knowledge_graph?user_id={user_id}"
+            if file_id:
+                url += f"&file_id={file_id}"
+            logger.debug(f"Requesting knowledge graph from: {url}")
+            response = requests.get(
+                url,
+                headers={"X-API-Key": settings.openai_api_key}
+            )
+
+        if response.status_code == 200:
+            graph_data = response.json()
+            logger.debug(f"Graph data received: {json.dumps(graph_data, indent=2)}")
+            if not graph_data["nodes"]:
+                st.warning("No knowledge graph data available for this user or document.")
+                return
+            net = Network(height="600px", width="100%", directed=True, notebook=True)
+            for node in graph_data["nodes"]:
+                net.add_node(
+                    node["id"],
+                    label=node["label"],
+                    color="#4CAF50" if node["type"] == "entity" else "#2196F3"
+                )
+            for edge in graph_data["edges"]:
+                net.add_edge(edge["from"], edge["to"], title=edge["label"])
+
+            # Save to temporary HTML file
+            temp_file = f"/tmp/knowledge_graph_{user_id}_{file_id if file_id else 'all'}.html"
+            logger.debug(f"Saving graph to: {temp_file}")
+            net.write_html(temp_file)
+            with open(temp_file, "r") as f:
+                html_content = f.read()
+            components.html(html_content, height=600)
+        else:
+            st.error(f"Failed to load knowledge graph: {response.json().get('detail', 'Unknown error')}")
+    except Exception as e:
+        logger.error(f"Error loading knowledge graph: {str(e)}")
+        st.error(f"Error loading knowledge graph: {str(e)}")
 
 def render_debug_page():
     """Render the debug page for a specific file"""
     file_id = st.query_params.get("file_id", [None])[0]
+    logger.info(f"Rendering debug page for file_id={file_id}, query_params={st.query_params}")
     if not file_id:
+        logger.error("No file_id provided in query parameters")
         st.error("No File ID provided")
         st.button("Back to Main", on_click=lambda: st.query_params.update(page="main"))
         return
 
-    st.title(f"Debug: File ID {file_id[:8]}...")
     file_meta = next(
         (f for f in st.session_state.file_metadata if f['file_id'] == file_id),
         None
     )
 
     if not file_meta:
+        logger.error(f"File ID {file_id} not found in session state")
         st.error("File not found in session state")
         st.button("Back to Main", on_click=lambda: st.query_params.update(page="main"))
         return
 
+    st.title(f"Debug: File ID {file_id[:8]}...")
     # File metadata section
     st.markdown("### File Metadata")
     cols = st.columns(2)
@@ -429,7 +486,7 @@ def render_debug_page():
                 },
                 headers={"X-API-Key": settings.openai_api_key}
             )
-            
+
         if response.status_code == 200:
             points = response.json().get("results", [])
             if points:
@@ -453,6 +510,9 @@ def render_debug_page():
         logger.error(f"Search query failed for file_id {file_id}: {str(e)}")
         st.error(f"Failed to query chunks: {str(e)}")
 
+    # Knowledge graph visualization section
+    render_knowledge_graph(file_meta['user_id'], file_id)
+
     st.button("Back to Main", on_click=lambda: st.query_params.update(page="main"))
 
 def render_main_page():
@@ -462,8 +522,8 @@ def render_main_page():
 
     # Get user ID
     user_id = st.text_input(
-        "Enter User ID", 
-        value="default_user", 
+        "Enter User ID",
+        value="default_user",
         key="user_id_input"
     )
     if user_id:
@@ -481,11 +541,11 @@ def render_main_page():
 
 # Router
 page = st.query_params.get("page", ["main"])[0]
-
+logger.info(f"Query parameter 'page': {page}, full query params: {st.query_params}")
 if page == "main":
     render_main_page()
 elif page == "debug":
     render_debug_page()
 else:
-    st.error("Invalid page")
+    st.error(f"Invalid page: {page}")
     st.button("Go to Main Page", on_click=lambda: st.query_params.update(page="main"))

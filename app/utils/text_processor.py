@@ -36,7 +36,7 @@ class TextProcessor:
         for sent in doc.sents:
             sent_text = sent.text
             sent_tokens = len(self.nlp.tokenizer(sent_text))
-            
+
             if token_count + sent_tokens > max_tokens:
                 if current_chunk:
                     chunks.append({
@@ -49,7 +49,7 @@ class TextProcessor:
                     chunk_index += 1
                     current_chunk = ""
                     token_count = 0
-            
+
             current_chunk += sent_text + " "
             token_count += sent_tokens
 
@@ -76,7 +76,8 @@ class TextProcessor:
         """Extract entities using Spacy"""
         try:
             doc = self.nlp(text)
-            entities = [ent.text for ent in doc.ents if ent.label_ in ["PERSON", "ORG", "GPE", "NORP"]]
+            entities = [ent.text for ent in doc.ents if ent.label_ in ["PERSON", "ORG", "GPE", "NORP", "PRODUCT", "EVENT"]]
+            logger.debug(f"Extracted entities: {entities}")
             return list(set(entities))  # Remove duplicates
         except Exception as e:
             logger.error(f"Entity extraction failed: {str(e)}")
@@ -90,16 +91,16 @@ class TextProcessor:
     async def extract_relationships(self, chunk: Dict) -> List[Dict]:
         """Extract relationships using OpenAI API"""
         prompt = (
-            "Extract relationships (e.g., person works at organization, entity is located in place) "
+            "Extract precise relationships (e.g., 'person works at organization', 'entity is located in place', 'organization owns product') "
             "from the following text. Return a JSON object with a 'relationships' key containing a list of "
-            "{subject, predicate, object} dictionaries. Ensure the response is valid JSON. "
+            "{subject, predicate, object} dictionaries. Ensure the response is valid JSON and relationships are specific and meaningful. "
             "If no relationships are found, return an empty list under 'relationships'. "
             "Do not include markdown code blocks or extra text.\n\n"
             f"Text: {chunk['content']}\n\n"
             "Example output:\n"
-            "{\"relationships\": [{\"subject\": \"John Doe\", \"predicate\": \"works at\", \"object\": \"Acme Corp\"}]}"
+            "{\"relationships\": [{\"subject\": \"John Doe\", \"predicate\": \"works at\", \"object\": \"Acme Corp\"}, {\"subject\": \"Acme Corp\", \"predicate\": \"owns\", \"object\": \"Product X\"}]}"
         )
-        
+
         try:
             response = openai.chat.completions.create(
                 model="gpt-4o-mini",
@@ -118,25 +119,25 @@ class TextProcessor:
                 max_tokens=300,
                 temperature=0.3
             )
-            
+
             raw_response = response.choices[0].message.content.strip()
-            
+
             if not raw_response:
                 logger.error(f"Empty response for chunk {chunk['chunk_index']}")
                 return []
-                
+
             try:
                 result = json.loads(raw_response)
                 if not isinstance(result, dict) or 'relationships' not in result:
                     logger.error(f"Invalid JSON structure for chunk {chunk['chunk_index']}: missing 'relationships' key")
                     logger.debug(f"Problematic response: {raw_response}")
                     return []
-                    
+
                 if not isinstance(result['relationships'], list):
                     logger.error(f"'relationships' is not a list in chunk {chunk['chunk_index']}")
                     logger.debug(f"Problematic response: {raw_response}")
                     return []
-                    
+
                 valid_relationships = []
                 for rel in result['relationships']:
                     if isinstance(rel, dict) and all(key in rel for key in ['subject', 'predicate', 'object']):
@@ -147,7 +148,8 @@ class TextProcessor:
                         })
                     else:
                         logger.warning(f"Invalid relationship format in chunk {chunk['chunk_index']}: {rel}")
-                        
+
+                logger.debug(f"Extracted relationships for chunk {chunk['chunk_index']}: {valid_relationships}")
                 return valid_relationships
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse JSON for chunk {chunk['chunk_index']}: {str(e)}")

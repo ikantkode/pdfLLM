@@ -1,53 +1,45 @@
 # pdfLLM API Documentation
 
-The `pdfLLM` FastAPI backend (`app/main.py`) provides RESTful endpoints for programmatic access to document processing, search, chat, and management functionalities. All endpoints require an `X-API-Key` header with a valid OpenAI API key and a `user_id` to scope data to specific users. The API integrates with Qdrant for vector storage and OpenAI for embeddings and chat responses.
+The `pdfLLM` FastAPI backend provides RESTful endpoints to upload, search, chat with, and manage documents. This API combines semantic and graph-based retrieval to deliver intelligent answers from document context.
 
-## Endpoints
+> 🛡 All endpoints require:
+> - `X-API-Key` header
+> - `user_id` (as form/query param)
 
-### 1. `POST /process_file`
-**Description**: Upload and process a file, converting it to markdown, chunking content, generating OpenAI embeddings, and storing chunks in Qdrant. Metadata is saved in `state.json`.
+---
 
-**Request**:
-- **Content-Type**: `multipart/form-data`
-- **Parameters**:
-  - `file` (UploadFile): File to process (e.g., `.pdf`, `.txt`, `.docx`, `.xlsx`, `.png`). Max size: 200MB.
-  - `user_id` (str): Unique user identifier.
-- **Headers**:
-  - `X-API-Key`: OpenAI API key.
-- **Example**:
-  ```bash
-  curl -X POST http://localhost:8000/process_file   -H "X-API-Key: your-openai-api-key"   -F "file=@example_document.pdf"   -F "user_id=default_user"
-  ```
+## 🔄 `POST /process_file`
+
+**Description**: Upload and convert a document. Generates embeddings and stores metadata + vectors.
+
+**Form Fields**:
+- `file`: The document to upload.
+- `user_id`: Your user/session ID.
+
+**Headers**:
+- `X-API-Key`: Your API key.
 
 **Response**:
-- **Status**: 200 OK
-- **Body**:
-  ```json
-  {
-    "status": "success",
-    "file_id": "aae5b99b-8145-4259-b4f6-f46aee4e67bd",
-    "filename": "example_document.pdf"
-  }
-  ```
-
-### 2. `POST /search`
-**Description**: Search Qdrant for document chunks relevant to a query using OpenAI embeddings and entity-based filtering.
-
-**Request**:
-- **Content-Type**: `multipart/form-data`
-- **Parameters**:
-  - `query` (str): Search query.
-  - `user_id` (str): Unique user identifier.
-  - `file_id` (str, optional): Filter by document ID.
-  - `limit` (int, default=5): Maximum chunks to return.
-  - `use_graph` (bool, default=True): Include knowledge graph-based retrieval.
-- **Headers**:
-  - `X-API-Key`: OpenAI API key.
-
-**Example**:
-```bash
-curl -X POST http://localhost:8000/search -H "X-API-Key: your-openai-api-key" -F "query=What is the requisition amount for the project?" -F "user_id=default_user" -F "file_id=aae5b99b-8145-4259-b4f6-f46aee4e67bd"
+```json
+{
+  "status": "success",
+  "file_id": "uuid-string",
+  "filename": "your_file.pdf"
+}
 ```
+
+---
+
+## 🔍 `POST /search`
+
+**Description**: Search documents using hybrid retrieval (semantic + knowledge graph).
+
+**Form Fields**:
+- `query`: The user question.
+- `user_id`: User/session ID.
+- `file_ids`: Optional list of file UUIDs.
+- `limit`: Max number of results (default: 5).
+- `use_graph`: Boolean for using knowledge graph (default: true).
 
 **Response**:
 ```json
@@ -55,94 +47,118 @@ curl -X POST http://localhost:8000/search -H "X-API-Key: your-openai-api-key" -F
   "status": "success",
   "results": [
     {
-      "chunk_id": "uuid-string",
-      "document_id": "aae5b99b-8145-4259-b4f6-f46aee4e67bd",
-      "filename": "example_document.pdf",
-      "parent_section": "Section 1",
-      "chunk_index": 1,
-      "content": "CURRENT PAYMENT DUE: $29,825.80",
-      "entities": ["Example Contractor Inc."],
-      "relationships": [{"subject": "Example Contractor Inc.", "predicate": "appears_in", "object": "aae5b99b-8145-4259-b4f6-f46aee4e67bd"}],
-      "score": 0.95
+      "chunk_id": "uuid",
+      "document_id": "doc_uuid",
+      "filename": "your_file.pdf",
+      "parent_section": "Section 0",
+      "chunk_index": 0,
+      "content": "text from the file...",
+      "entities": ["Entity A"],
+      "relationships": [{"subject": "Entity A", "predicate": "appears_in", "object": "doc_uuid"}],
+      "score": 0.93
     }
   ]
 }
 ```
 
-### 3. `POST /chat`
-**Description**: Generate a chat response using OpenAI’s model with context from Qdrant-retrieved chunks.
+---
 
-**Request**:
-- **Content-Type**: `multipart/form-data`
-- **Parameters**:
-  - `query` (str): User’s question.
-  - `user_id` (str): Unique user identifier.
-  - `file_ids` (List[str], optional): List of document IDs for context.
-  - `chat_id` (str, optional): Existing chat session ID.
-- **Headers**:
-  - `X-API-Key`: OpenAI API key.
+## 💬 `POST /chat`
 
-**Example**:
-```bash
-curl -X POST http://localhost:8000/chat -H "X-API-Key: your-openai-api-key" -F "query=What is the upcoming requisition amount for the project?" -F "user_id=default_user" -F "file_ids=aae5b99b-8145-4259-b4f6-f46aee4e67bd"
-```
+**Description**: Ask questions about uploaded documents. Returns structured and formatted answers.
+
+**Form Fields**:
+- `query`: Your question.
+- `user_id`: Your user/session ID.
+- `file_ids`: Optional list of document UUIDs.
+- `chat_id`: Optional chat session ID (for continuity).
 
 **Response**:
 ```json
 {
-  "response": "The requisition amount is $29,825.80, noted in Section 1 of example_document.pdf under 'CURRENT PAYMENT DUE'.",
-  "chat_id": "uuid-string",
-  "sources": [
+  "response": "Here is the answer to your query...",
+  "chat_id": "uuid",
+  "sources": [/* matching chunks */]
+}
+```
+
+---
+
+## 📂 `GET /documents`
+
+**Description**: List all uploaded files for a user.
+
+**Query Parameters**:
+- `user_id`: Your user/session ID.
+
+**Headers**:
+- `X-API-Key`: Your API key.
+
+**Response**:
+```json
+{
+  "status": "success",
+  "documents": [
     {
-      "chunk_id": "uuid-string",
-      "document_id": "aae5b99b-8145-4259-b4f6-f46aee4e67bd",
-      "filename": "example_document.pdf",
-      "parent_section": "Section 1",
-      "chunk_index": 1,
-      "content": "CURRENT PAYMENT DUE: $29,825.80",
-      "entities": ["Example Contractor Inc."],
-      "relationships": [{"subject": "Example Contractor Inc.", "predicate": "appears_in", "object": "aae5b99b-8145-4259-b4f6-f46aee4e67bd"}],
-      "score": 0.95
+      "file_id": "uuid",
+      "filename": "doc.pdf",
+      "file_type": ".pdf",
+      "upload_date": "2025-07-09T14:12:33",
+      "size": 302581
     }
   ]
 }
 ```
 
-### 4. `GET /documents`
-**Description**: List all documents uploaded by a user.
+---
 
-**Request**:
-- **Parameters**:
-  - `user_id` (str): Unique user identifier.
-- **Headers**:
-  - `X-API-Key`: OpenAI API key.
+## 🗑 `DELETE /documents/{file_id}`
 
-### 5. `DELETE /documents/{file_id}`
-**Description**: Delete a document and its Qdrant chunks.
+**Description**: Delete a document and its stored embeddings.
 
-**Request**:
-- **Parameters**:
-  - `file_id` (str): Document ID to delete.
-  - `user_id` (str): Unique user identifier.
-- **Headers**:
-  - `X-API-Key`: OpenAI API key.
+**Query Parameters**:
+- `user_id`: Your user/session ID.
 
-### 6. `GET /preview/{file_id}`
-**Description**: Stream a file’s content for preview.
+**Path Parameter**:
+- `file_id`: UUID of the document.
 
-**Request**:
-- **Parameters**:
-  - `file_id` (str): Document ID to preview.
-  - `user_id` (str): Unique user identifier.
-- **Headers**:
-  - `X-API-Key`: OpenAI API key.
+---
 
-### 7. `GET /health`
-**Description**: Check the health of the FastAPI service.
+## 👁 `GET /preview/{file_id}`
+
+**Description**: Preview the raw content of an uploaded document.
+
+**Query Parameters**:
+- `user_id`: Your user/session ID.
+
+**Response**: `StreamingResponse` of the decoded file content.
+
+---
+
+## 🧠 `GET /knowledge_graph`
+
+**Description**: Get a graph structure of all entities and relationships.
+
+**Query Parameters**:
+- `user_id`: Your user/session ID.
+- `file_id` (optional): Filter for one document.
 
 **Response**:
 ```json
 {
-  "status": "healthy"
+  "status": "success",
+  "nodes": [{"id": "entity", "label": "entity", "type": "entity"}],
+  "edges": [{"from": "entity1", "to": "entity2", "label": "appears_in", "weight": 1.0}]
 }
+```
+
+---
+
+## ❤️ `GET /health`
+
+**Description**: Check if the server is up and running.
+
+**Response**:
+```json
+{ "status": "healthy" }
 ```

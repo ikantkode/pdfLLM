@@ -5,15 +5,16 @@ import logging
 import base64
 import datetime
 import hashlib
+import re
 from typing import List, Dict, Optional, Any
 from io import BytesIO
 from pathlib import Path
 
 from fastapi import (
-    FastAPI, 
-    UploadFile, 
-    File, 
-    Form, 
+    FastAPI,
+    UploadFile,
+    File,
+    Form,
     HTTPException,
     Depends,
     status,
@@ -146,40 +147,41 @@ class KnowledgeGraph:
     def __init__(self):
         self.graph = nx.DiGraph()
         self.entity_index = {}
-        
+
     def add_relationship(
-        self, 
-        source: str, 
-        target: str, 
-        relationship: str, 
+        self,
+        source: str,
+        target: str,
+        relationship: str,
         weight: float = 1.0
     ) -> None:
         """Add a relationship between entities"""
+        logger.debug(f"Adding relationship: {source} -> {relationship} -> {target}")
         if source not in self.graph:
             self.graph.add_node(source, type='entity')
         if target not in self.graph:
             self.graph.add_node(target, type='entity')
         self.graph.add_edge(
-            source, 
-            target, 
-            relationship=relationship, 
+            source,
+            target,
+            relationship=relationship,
             weight=weight
         )
-        
+
     def find_related_entities(
-        self, 
-        entity: str, 
+        self,
+        entity: str,
         depth: int = settings.max_graph_depth
     ) -> List[str]:
         """Find related entities within specified depth"""
         if entity not in self.graph:
             return []
         return list(nx.single_source_shortest_path_length(
-            self.graph, 
-            entity, 
+            self.graph,
+            entity,
             cutoff=depth
         ).keys())
-    
+
     def save(self) -> None:
         """Save graph to file"""
         data = nx.node_link_data(self.graph)
@@ -189,7 +191,7 @@ class KnowledgeGraph:
             logger.info("Knowledge graph saved successfully")
         except Exception as e:
             logger.error(f"Failed to save knowledge graph: {str(e)}")
-            
+
     def load(self) -> None:
         """Load graph from file"""
         if os.path.exists(settings.graph_file):
@@ -302,39 +304,122 @@ def rank_results(entity_results: List, vector_results: List, limit: int) -> List
     """Combine and rank results from different retrieval methods"""
     seen = set()
     combined = []
-    
+
     for result in entity_results + vector_results:
         result_id = result.id if hasattr(result, 'id') else result.get('chunk_id')
         if result_id and result_id not in seen:
             seen.add(result_id)
+            score = (result.score if hasattr(result, 'score') else result.get('score', 0.0))
+            score += 0.1 * len(result.payload.get('entities', []))  # Boost for entities
+            score += 0.2 * len(result.payload.get('relationships', []))  # Boost for relationships
+            result.score = score
             combined.append(result)
-    
+
     return sorted(
         combined,
         key=lambda x: x.score if hasattr(x, 'score') else x.get('score', 0.0),
         reverse=True
     )[:limit]
 
+def clean_text_for_context(text: str) -> str:
+    """Clean text to handle OCR issues and improve coherence"""
+    # Normalize whitespace but preserve line structure
+    text = re.sub(r'[ \t]+', ' ', text)  # Only normalize spaces/tabs
+    text = re.sub(r'\n[ \t]+', '\n', text)  # Remove leading spaces after newlines
+    text = re.sub(r'[ \t]+\n', '\n', text)  # Remove trailing spaces before newlines
+    text = text.strip()
+    
+    # Remove excessive special characters but be conservative
+    text = re.sub(r'([^\w\s])\1{2,}', r'\1', text)  # Remove 3+ repeated special chars
+    
+    # Remove repeated words/phrases but be more conservative
+    text = re.sub(r'\b(\w+)\s+\1\s+\1\b', r'\1', text, flags=re.IGNORECASE)  # Only remove 3+ repeats
+    
+    # Remove clearly problematic characters, but preserve more formatting
+    text = re.sub(r'[^\w\s\.\,\$\(\)\-\n\r\t:;]', '', text)
+    
+    # Fix malformed numbers (e.g., "1,98.16" -> "198.16")
+    text = re.sub(r'(\d+),(\d{2})\.(\d{2})', r'\1\2.\3', text)
+    
+    # Filter out gibberish (require at least 3 meaningful words)
+    lines = text.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        words = line.split()
+        if len([w for w in words if len(w) > 2]) >= 3:
+            cleaned_lines.append(line)
+    
+    return '\n'.join(cleaned_lines)
+
+def clean_query(query: str) -> str:
+    """Clean user query to handle OCR-like noise and payroll-specific formatting"""
+    # Normalize whitespace
+    query = re.sub(r'\s+', ' ', query).strip()
+    
+    # Remove excessive special characters
+    query = re.sub(r'([^\w\s])\1+', r'\1', query)
+    
+    # Remove repeated words/phrases
+    query = re.sub(r'\b(\w+)\s+\1\b', r'\1', query, flags=re.IGNORECASE)
+    
+    # Remove invalid characters, preserving common punctuation and currency
+    query = re.sub(r'[^\w\s\.\,\$\(\)\-]', '', query)
+    
+    # Fix malformed numbers (e.g., "1,98.16" -> "1988.16")
+    query = re.sub(r'(\d+),(\d{2})\.(\d{2})', r'\1\2.\3', query)
+    
+    # Correct payroll-specific formats (e.g., "7,068.92Net5,079.50" -> "Gross $7068.92, Net $5079.50")
+    query = re.sub(r'(\d+\.\d{2})Net(\d+\.\d{2})', r'Gross $\1, Net $\2', query)
+    
+    # Fix per-hour rates (e.g., "5.05perhour" -> "$5.05 per hour")
+    query = re.sub(r'(\d+\.\d{2})\s*perhour', r'$\1 per hour', query, flags=re.IGNORECASE)
+    
+    # Reconstruct fragmented names (e.g., "D z i u b a" -> "Dziuba")
+    query = re.sub(r'\b(\w)\s+(\w)\s+(\w)\s+(\w)\s+(\w)\b', r'\1\2\3\4\5', query)
+    query = re.sub(r'\b(\w)\s+(\w)\s+(\w)\s+(\w)\b', r'\1\2\3\4', query)
+    
+    # Fix document names (e.g., "CPRPreviewSCA (1).pdf" -> "CPRPreviewSCA_1.pdf")
+    query = re.sub(r'CPRPreviewSCA\s*\((\d+)\)\.pdf', r'CPRPreviewSCA_\1.pdf', query)
+    
+    logger.debug(f"Cleaned query: {query}")
+    return query
+
 async def build_chat_context(results: List[SearchResult]) -> str:
-    """Build context from search results with token limits"""
+    """Build context from search results with token limits and OCR cleanup"""
     context = ""
     token_count = 0
     file_map = {f['file_id']: f['filename'] for f in state_manager.file_metadata}
-    
+    seen_content = set()
+
     for result in results:
         content = result.content
-        tokens = len(tokenizer.encode(content))
+        # Clean content to handle OCR issues
+        cleaned_content = clean_text_for_context(content)
         
-        if token_count + tokens > settings.max_completion_tokens * 0.6:
-            break
+        # Skip empty or low-quality content
+        if not cleaned_content:
+            logger.debug(f"Skipped low-quality chunk: {content[:100]}...")
+            continue
             
+        # Skip duplicate content
+        if cleaned_content in seen_content:
+            logger.debug(f"Skipped duplicate chunk: {cleaned_content[:100]}...")
+            continue
+        seen_content.add(cleaned_content)
+
+        tokens = len(tokenizer.encode(cleaned_content))
+        if token_count + tokens > settings.max_completion_tokens * 0.8:
+            logger.debug(f"Context truncated at {token_count} tokens to stay within limit")
+            break
+
         context += f"Document: {file_map.get(result.document_id, 'Unknown')}\n"
         context += f"Section: {result.chunk_index}\n"
         context += f"Entities: {', '.join(result.entities)}\n"
         context += f"Relationships: {', '.join(['{} {} {}'.format(rel['subject'], rel['predicate'], rel['object']) for rel in result.relationships])}\n"
-        context += f"Content: {content}\n\n"
+        context += f"Content: {cleaned_content}\n\n"
         token_count += tokens
-        
+
+    logger.debug(f"Built context with {token_count} tokens: {context[:500]}...")
     return context
 
 @retry(
@@ -343,31 +428,80 @@ async def build_chat_context(results: List[SearchResult]) -> str:
     reraise=True
 )
 def generate_coherent_response(query: str, context: str) -> str:
-    """Generate response with proper token management"""
+    """Generate response with proper token management and assistant-like behavior"""
     prompt = (
         f"Context:\n{context}\n\n"
         f"Query: {query}\n\n"
-        "Answer the query concisely based on the context. Cite the document name and section number. "
-        "Include-relevant entities or relationships only if they directly relate to the answer. "
-        "Return a plain-text response with no special characters, newlines between characters, or repeated text. "
-        f"Keep response under {settings.max_completion_tokens} tokens. "
-        "Example: The requisition amount for PS 54X is $29,825.80, noted in Section 1 of AMB PS 54X AIA3.pdf under 'CURRENT PAYMENT DUE'."
+        "You are a professional personal assistant tasked with providing a clear, concise, and accurate response based solely on the provided context and query. "
+        "The context and query may contain noisy or poorly formatted text due to OCR errors (e.g., jumbled characters, repeated fragments, misaligned formatting, or malformed numbers like '1,98.16' or '7,068.92Net5,079.50'). "
+        "Follow these instructions:\n"
+        "1. Structure the response in a well-organized manner with complete sentences and proper grammar.\n"
+        "2. Avoid repetition of words, phrases, or numbers unless necessary for clarity.\n"
+        "3. Correct and format numerical values (e.g., '1,98.16' → '$1,988.16', '7,068.92Net5,079.50' → 'Gross $7,068.92, Net $5,079.50', '5.05perhour' → '$5.05 per hour').\n"
+        "4. Cite the document name and section number for each piece of information used (e.g., 'CPRPreviewSCA_1.pdf (Section 0)').\n"
+        "5. Include relevant entities or relationships only if they directly contribute to answering the query.\n"
+        "6. Do not speculate or include information not present in the context or query.\n"
+        "7. For queries asking to 'explain' payroll documents, provide a narrative summary of their content, purpose, and key details, followed by a structured list or table of payroll details (e.g., Employee, Role, Hours, Rate, Gross Pay, Net Pay).\n"
+        "8. For queries asking for total expenditure, calculate the sum of gross and net pay across all documents, validating numbers against the context and query, and present the totals clearly.\n"
+        "9. Keep the response under {settings.max_completion_tokens} tokens.\n"
+        "10. Handle noisy input by prioritizing meaningful information, ignoring jumbled characters, repeated fragments, or formatting errors.\n"
+        "11. Reconstruct malformed text or numbers (e.g., 'D z i u b a' → 'Dziuba', '1,98.16' → '$1,988.16') and validate against context where possible.\n"
+        "12. If hours or rates are missing, estimate them using gross pay and typical rates from the context, noting assumptions.\n"
+        "13. If the context or query is unclear, reconstruct the most likely intended meaning and note limitations (e.g., 'Some details may be incomplete due to OCR errors').\n\n"
+        "Example response for 'Explain the document and tell me how much money was spent in total':\n"
+        "The documents 'CPRPreviewSCA_6.pdf' and 'CPRPreviewSCA_5.pdf' are certified payroll reports from AMB Contractors Inc. for the P.S.54 - BRONX project, detailing employee wages. Below is a summary of the payroll details:\n\n"
+        "| Employee | Role | Hours | Rate | Gross Pay | Net Pay | Source |\n"
+        "|----------|------|-------|------|-----------|---------|--------|\n"
+        "| Zenovii Dziuba | Laborer | 16 | $94.43 | $1,510.88 | $1,143.20 | CPRPreviewSCA_6.pdf (Section 0) |\n"
+        "| Ermilo Lopez | Laborer | 8 | $94.43 | $755.44 | $608.65 | CPRPreviewSCA_6.pdf (Section 0) |\n"
+        "| Zenovii Dziuba | Laborer | 30 | $94.43 | $2,832.90 | $1,988.16 | CPRPreviewSCA_5.pdf (Section 0) |\n"
+        "| Ermilo Lopez | Laborer | 30 | $94.43 | $2,832.90 | $1,988.16 | CPRPreviewSCA_5.pdf (Section 0) |\n\n"
+        "Total expenditure: Gross Pay $7,932.12, Net Pay $5,728.17. Some details may be incomplete due to OCR errors."
     )
-    
+
     try:
         response = openai.chat.completions.create(
             model=settings.chat_model,
             messages=[
                 {
-                    "role": "system", 
-                    "content": "You are a helpful assistant that answers queries based on document context. Provide concise, plain-text responses, citing sources clearly. Avoid special characters, excessive newlines, or repeating context."
+                    "role": "system",
+                    "content": (
+                        "You are a professional personal assistant. Provide clear, concise, and accurate responses based strictly on the provided context and query. "
+                        "Handle noisy text from OCR errors (e.g., jumbled characters, repeated fragments, malformed numbers like '1,98.16' or '7,068.92Net5,079.50') by prioritizing coherent information and reconstructing meaning. "
+                        "Structure responses with complete sentences, proper grammar, and correct spelling. "
+                        "Format numbers correctly (e.g., '$1,988.16', '$5.05 per hour') and cite sources (document name and section). "
+                        "For payroll-related queries, present details in a clear list or table format, including Employee, Role, Hours, Rate, Gross Pay, and Net Pay. "
+                        "Calculate total expenditure (gross and net) when requested, validating against context and query. "
+                        "Estimate missing hours or rates using context data, noting assumptions. "
+                        "Do not speculate or add information beyond the context or query. "
+                        "Note limitations due to OCR errors if applicable."
+                    )
                 },
                 {"role": "user", "content": prompt}
             ],
             max_tokens=settings.max_completion_tokens,
-            temperature=0.7
+            temperature=0.3
         )
-        return response.choices[0].message.content.strip()
+        response_text = response.choices[0].message.content.strip()
+        
+        # MUCH more gentle post-processing - only fix obvious OCR issues
+        # Remove excessive whitespace but preserve line breaks and formatting
+        response_text = re.sub(r'[ \t]+', ' ', response_text)  # Only normalize spaces/tabs, keep newlines
+        response_text = re.sub(r'\n[ \t]+', '\n', response_text)  # Remove leading spaces after newlines
+        response_text = re.sub(r'[ \t]+\n', '\n', response_text)  # Remove trailing spaces before newlines
+        
+        # Fix obvious OCR number errors but be very conservative
+        response_text = re.sub(r'(\d+),(\d{2})\.(\d{2})', r'\1\2.\3', response_text)  # Fix "1,98.16" -> "198.16"
+        response_text = re.sub(r'(\d+\.\d{2})Net(\d+\.\d{2})', r'Gross $\1, Net $\2', response_text)  # Fix joined numbers
+        
+        # Remove only clearly problematic characters, preserve formatting
+        response_text = re.sub(r'[^\w\s\.\,\$\(\)\-\|\n\r\t:;]', '', response_text)
+        
+        # DON'T remove "repeated" words - this breaks legitimate formatting!
+        # DON'T collapse all whitespace - this destroys table formatting!
+        
+        logger.debug(f"Generated response: {response_text[:500]}...")
+        return response_text
     except Exception as e:
         logger.error(f"Failed to generate response: {str(e)}")
         raise
@@ -404,7 +538,7 @@ async def process_file(
 
     # Check for existing file
     existing_file = next(
-        (f for f in state_manager.file_metadata 
+        (f for f in state_manager.file_metadata
          if f['filename'] == file.filename and f['user_id'] == user_id),
         None
     )
@@ -419,12 +553,12 @@ async def process_file(
     file_ext = os.path.splitext(file.filename)[1].lower()
     file_id = str(uuid.uuid4())
     temp_path = Path(settings.temp_upload_dir) / f"{file_id}{file_ext}"
-    
+
     try:
         # Save and convert file
         file_content = await file.read()
         temp_path.write_bytes(file_content)
-            
+
         converter = get_file_converter(file_ext)
         if not converter:
             raise HTTPException(
@@ -433,26 +567,26 @@ async def process_file(
             )
 
         markdown_content = converter(str(temp_path))
-        
+
         # Process content with enhanced chunking
         cleaned_markdown = text_processor.clean_markdown(markdown_content)
         chunks = text_processor.chunk_text(cleaned_markdown)
-        
+
         # Process in batches for large documents
         batch_size = 50
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i:i + batch_size]
-            
+
             # Generate embeddings and extract knowledge
             batch = await text_processor.generate_embeddings(batch)
-            
+
             for chunk in batch:
                 chunk['document_id'] = file_id
                 chunk['user_id'] = user_id
-                
+
                 # Add to vector store
                 await qdrant_handler.save_chunk(chunk, user_id)
-                
+
                 # Index entities and relationships in knowledge graph
                 for entity in chunk.get('entities', []):
                     knowledge_graph.add_relationship(
@@ -460,14 +594,14 @@ async def process_file(
                         target=file_id,
                         relationship="appears_in"
                     )
-                
+
                 for rel in chunk.get('relationships', []):
                     knowledge_graph.add_relationship(
                         source=rel['subject'],
                         target=rel['object'],
                         relationship=rel['predicate']
                     )
-        
+
         # Store metadata
         state_manager.file_metadata.append({
             "file_id": file_id,
@@ -480,7 +614,7 @@ async def process_file(
             "size": file.size,
             "checksum": hashlib.md5(file_content).hexdigest()
         })
-        
+
         state_manager.save()
         logger.info(f"Processed file: {file.filename} (ID: {file_id})")
         return {
@@ -488,7 +622,7 @@ async def process_file(
             "file_id": file_id,
             "filename": file.filename
         }
-        
+
     except Exception as e:
         logger.error(f"File processing failed for {file.filename}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -503,17 +637,22 @@ async def process_file(
 async def search_documents(
     query: str = Form(...),
     user_id: str = Form(...),
-    file_id: Optional[str] = Form(None),
+    file_ids: Optional[List[str]] = Form(None),
     limit: int = Form(5),
     use_graph: bool = Form(True),
     api_key: str = Depends(validate_api_key)
 ):
     """Search documents with dual-level retrieval"""
     try:
+        # Clean query before processing
+        cleaned_query = clean_query(query)
+        logger.debug(f"Original query: {query}")
+        logger.debug(f"Cleaned query for search: {cleaned_query}")
+        
         # Entity-based retrieval from knowledge graph
         entity_results = []
         if use_graph:
-            entities = await text_processor.extract_entities(query)
+            entities = await text_processor.extract_entities(cleaned_query)
             for entity in entities:
                 related_entities = knowledge_graph.find_related_entities(entity)
                 if related_entities:
@@ -521,38 +660,43 @@ async def search_documents(
                         await qdrant_handler.search_entities(
                             entities=related_entities,
                             user_id=user_id,
-                            file_id=file_id,
+                            file_ids=file_ids,
                             limit=limit
                         )
                     )
 
         # Vector-based retrieval
-        query_chunks = split_large_text(query)
+        query_chunks = split_large_text(cleaned_query)
         vector_results = []
-        
+
         for chunk in query_chunks:
             embedding = generate_embeddings_batch([chunk])[0]
+            query_filter = {
+                "must": [
+                    {"key": "user_id", "match": {"value": user_id}},
+                ]
+            }
+            if file_ids:
+                query_filter["must"].append(
+                    {"key": "document_id", "match": {"any": file_ids}}
+                )
+
             results = qdrant_handler.client.search(
                 collection_name=settings.qdrant_collection,
                 query_vector=embedding,
-                query_filter={
-                    "must": [
-                        {"key": "user_id", "match": {"value": user_id}},
-                        *([{"key": "document_id", "match": {"value": file_id}}] if file_id else [])
-                    ]
-                },
+                query_filter=query_filter,
                 limit=limit
             )
             vector_results.extend(results)
 
         # Combine and rank results
         combined_results = rank_results(entity_results, vector_results, limit)
-        
+
         return {
             "status": "success",
             "results": format_search_results(combined_results)
         }
-        
+
     except Exception as e:
         logger.error(f"Search failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -567,30 +711,36 @@ async def chat_with_documents(
 ):
     """Chat with document context"""
     try:
+        # Clean query before processing
+        cleaned_query = clean_query(query)
+        logger.debug(f"Original query: {query}")
+        logger.debug(f"Cleaned query for chat: {cleaned_query}")
+
         # Perform dual-level retrieval
         search_results = await search_documents(
-            query=query,
+            query=cleaned_query,
             user_id=user_id,
-            file_id=file_ids[0] if file_ids else None,
-            limit=5,
+            file_ids=file_ids,
+            limit=10,
             use_graph=True
         )
-        
+
         if not search_results["results"]:
             return {
                 "response": "No relevant information found in documents.",
-                "chat_id": chat_id or str(uuid.uuid4())
+                "chat_id": chat_id or str(uuid.uuid4()),
+                "sources": []
             }
 
         # Build context with chunked approach
         context = await build_chat_context(search_results["results"])
-        
+
         # Generate response
-        response = generate_coherent_response(query, context)
-        
+        response = generate_coherent_response(cleaned_query, context)
+
         # Clean response to avoid formatting issues
         response = ' '.join(response.split()).strip()
-        
+
         # Update chat history
         chat_id = chat_id or str(uuid.uuid4())
         if chat_id not in state_manager.chat_sessions:
@@ -602,10 +752,10 @@ async def chat_with_documents(
                 "updated_at": datetime.datetime.now().isoformat(),
                 "document_ids": file_ids or []
             }
-            
+
         state_manager.chat_sessions[chat_id]["messages"].append({
             "role": "user",
-            "content": query,
+            "content": query,  # Store original query for history
             "timestamp": datetime.datetime.now().isoformat()
         })
         state_manager.chat_sessions[chat_id]["messages"].append({
@@ -614,14 +764,14 @@ async def chat_with_documents(
             "timestamp": datetime.datetime.now().isoformat()
         })
         state_manager.chat_sessions[chat_id]["updated_at"] = datetime.datetime.now().isoformat()
-        
+
         state_manager.save()
         return {
             "response": response,
             "chat_id": chat_id,
             "sources": search_results["results"]
         }
-        
+
     except Exception as e:
         logger.error(f"Chat failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -634,7 +784,7 @@ async def list_documents(
     """List uploaded documents for a user"""
     try:
         user_docs = [
-            f for f in state_manager.file_metadata 
+            f for f in state_manager.file_metadata
             if f.get("user_id") == user_id
         ]
         return {
@@ -705,6 +855,70 @@ async def preview_file(file_id: str, user_id: str, api_key: str = Depends(valida
         ".rtf": "application/rtf"
     }
     return StreamingResponse(BytesIO(base64.b64decode(file_meta['content'])), media_type=mime_map.get(file_meta['file_type'], "application/octet-stream"))
+
+@app.get("/knowledge_graph", response_model=Dict[str, Any])
+async def get_knowledge_graph(
+    user_id: str,
+    file_id: Optional[str] = None,
+    api_key: str = Depends(validate_api_key)
+):
+    """Retrieve knowledge graph data for visualization"""
+    try:
+        nodes = []
+        edges = []
+        file_map = {f['file_id']: f['filename'] for f in state_manager.file_metadata}
+
+        # Filter nodes and edges by user_id and optionally file_id
+        for node, data in knowledge_graph.graph.nodes(data=True):
+            node_type = data.get('type', 'entity')
+            if node_type == 'entity' and (not file_id or any(
+                edge[1] == file_id for edge in knowledge_graph.graph.edges(node)
+            )):
+                nodes.append({
+                    "id": node,
+                    "label": node,
+                    "type": node_type
+                })
+
+        # Include document nodes if they match file_id or user_id
+        if file_id:
+            if file_id in file_map:
+                nodes.append({
+                    "id": file_id,
+                    "label": file_map[file_id],
+                    "type": "entity"
+                })
+        else:
+            for file in state_manager.file_metadata:
+                if file['user_id'] == user_id:
+                    nodes.append({
+                        "id": file['file_id'],
+                        "label": file['filename'],
+                        "type": "entity"
+                    })
+
+        # Collect edges
+        for source, target, data in knowledge_graph.graph.edges(data=True):
+            if file_id and target != file_id and source != file_id:
+                continue
+            if any(f['file_id'] == target and f['user_id'] == user_id for f in state_manager.file_metadata) or \
+               any(f['file_id'] == source and f['user_id'] == user_id for f in state_manager.file_metadata):
+                edges.append({
+                    "from": source,
+                    "to": target,
+                    "label": data.get("relationship", "related_to"),
+                    "weight": data.get("weight", 1.0)
+                })
+
+        logger.info(f"Retrieved knowledge graph for user_id={user_id}, file_id={file_id}")
+        return {
+            "status": "success",
+            "nodes": nodes,
+            "edges": edges
+        }
+    except Exception as e:
+        logger.error(f"Failed to retrieve knowledge graph: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health_check():

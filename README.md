@@ -1,65 +1,61 @@
 # pdfLLM
 
-`pdfLLM` is a Retrieval-Augmented Generation (RAG) microservice designed for processing, storing, and querying documents such as PDFs, text files, Word documents, spreadsheets, and images. It leverages a FastAPI backend for programmatic access, a Streamlit frontend for interactive use, and a Qdrant vector database for efficient retrieval. Documents are converted to markdown, chunked, and embedded using OpenAI’s `text-embedding-3-small` model, with entities and relationships indexed in a knowledge graph.
+`pdfLLM` is a Retrieval-Augmented Generation (RAG) microservice that processes documents to allow querying, summarization, and chat-like interaction. It integrates document parsing, knowledge graph construction, semantic search, and LLM-based generation to offer advanced document intelligence.
 
 ## Overview
 
-`pdfLLM` is a hybrid RAG application that combines **semantic search** (vector-based similarity) with **graph-based search** (entity-relationship traversal) to provide accurate and contextually relevant answers. It processes uploaded documents, extracts text, identifies entities and relationships, and stores them in Qdrant and a `networkx`-based knowledge graph. Users can interact via a web UI or API, uploading files, querying document content, and debugging stored data.
+The system combines:
+- 📚 **Semantic Search**: Embedding-based retrieval using OpenAI.
+- 🧠 **Graph-Based Search**: Entity and relationship indexing via NetworkX.
+- 💬 **LLM-Powered Answers**: Uses OpenAI chat models to generate accurate, cited responses.
+- 📊 **Hybrid Retrieval**: Combines vector similarity and entity relationships for precision.
 
-## Road Map
+Documents are parsed, cleaned (OCR-aware), chunked, embedded, and indexed both in Qdrant and a NetworkX-based graph.
 
-- Implement Arango for Graphs.
-- Ollama Integration for Local Models Usage
-- Different LLM & Embedding Model Configurations
-  - LLM inference via DeepSeek API
-  - LLM inference via Grok
-  - LLM inference via Lambda.ai
-  - Embedding model choices:
-    - Ollama or OpenAI (I am not aware of any other hosted embedding model options other than on the run via HF, NOT implementing that.)
+## Features
+
+- 🗃 **Supported Formats**: `.pdf`, `.txt`, `.doc(x)`, `.xls(x)`, `.csv`, `.jpg`, `.png`, `.heic`, `.webp`, `.md`, `.rtf`, `.odt`, `.ods`
+- 🔄 **Conversion**: Converts to markdown using specialized parsers.
+- ✂️ **Chunking & Embedding**: Tokenizes and chunks cleaned markdown; embeddings generated via OpenAI.
+- 🧾 **Metadata Storage**: File metadata + base64 content saved for previews.
+- 🔍 **Search**: Hybrid search via `/search` endpoint (semantic + graph-based).
+- 💬 **Chat**: `/chat` endpoint answers queries with sources cited by section.
+- 🧠 **Knowledge Graph**: `/knowledge_graph` exposes nodes and edges.
+- 🔒 **Security**: All endpoints require `X-API-Key`.
+- 📁 **Persistent State**: `state.json` and `knowledge_graph.json` are stored for resilience.
+- 👁 **Preview**: Preview uploaded files directly via `/preview/{file_id}`.
 
 ## Deployment
 
 ```bash
 git clone https://github.com/ikantkode/pdfLLM.git
 cd pdfLLM
-mv env_example .env
-# Put your OpenAI key in .env
+mv env_example .env  # add your OpenAI and Qdrant configs
 docker compose up -d --build
 ```
 
-- Visit **http://localhost:8501** for the Streamlit web interface.
-- View `api_docs.md` for more information on using the FastAPI endpoints.
+- Visit: http://localhost:8000/docs (API docs)
+- Visit: http://localhost:8000/health (health check)
 
-### Type of RAG Application
-- **Retrieval-Augmented Generation**: Combines retrieval (fetching relevant document chunks) with generation (producing natural language responses using OpenAI’s `gpt-4o`).
-- **Hybrid Retrieval**: Integrates semantic search (cosine similarity on embeddings) with graph-based search (entity-relationship queries), enhancing precision for structured queries.
-- **Use Case**: Ideal for querying specific details (e.g., “What is the requisition amount for Project A?”) or summarizing documents (e.g., “What is this about?”) with source citations.
+## Example Use Cases
 
-## Features
-- **Document Processing**: Converts files (`.pdf`, `.txt`, `.doc`, `.docx`, `.odt`, `.xls`, `.xlsx`, `.csv`, `.ods`, `.jpg`, `.jpeg`, `.png`, `.heic`, `.webp`, `.md`, `.rtf`) to markdown using specialized converters.
-- **Vector Storage**: Stores document chunks in Qdrant with OpenAI embeddings (`text-embedding-3-small`) for semantic search.
-- **Semantic Search**: Retrieves chunks based on cosine similarity between query and chunk embeddings, ensuring contextually relevant results.
-- **Graph-Based Search**: Indexes entities (e.g., “Example Construction Inc.”) and relationships (e.g., “appears_in”) in a `networkx` graph, enabling structured queries.
-- **Knowledge Graph**: Persists entities and relationships in `knowledge_graph.json`, supporting queries like “Who is the subcontractor for Project A?”.
-- **Querying**: Generates responses using OpenAI’s `gpt-4o` model, citing sources (filename, section) for transparency.
-- **FastAPI Backend**: Provides programmatic access for file processing, searching, chatting, and document management.
-- **Streamlit Frontend**: Offers a UI for uploading files, managing documents, chatting, and debugging Qdrant chunks and metadata.
-- **State Persistence**: Shares `file_metadata` and `chat_sessions` between services via `state.json` and `streamlit_state.json`.
-- **Debug Interface**: Inspects file metadata and Qdrant chunks via `?page=debug&file_id=<uuid>`.
+- Extract payroll details from messy scanned PDFs.
+- Summarize project submissions and funding reports.
+- Ask structured questions like "How many hours did the carpenter work in April?"
 
-## Semantic and Graph Search
-- **Semantic Search**:
-  - **Mechanism**: Uses OpenAI’s `text-embedding-3-small` to generate 1536-dimensional embeddings for document chunks and queries. Qdrant performs cosine similarity searches to retrieve the top `limit` (default 5) chunks.
-  - **Implementation**: The `qdrant_handler.py` `search_entities` method filters chunks by `user_id`, `file_id` (optional), and entities, combining vector search results with `rank_results` in `main.py`.
-  - **Example**: Querying “What is the requisition amount for PS 54X?” retrieves chunks containing “CURRENT PAYMENT DUE: $29,825.80” based on semantic similarity.
-- **Graph-Based Search**:
-  - **Mechanism**: Extracts entities (e.g., “Varsity Plumbing and Heating, Inc.”) and relationships (e.g., “appears_in”) using Spacy (`en_core_web_sm`) in `text_processor.py`. Stores them in a `networkx` graph (`knowledge_graph.json`) and Qdrant payloads.
-  - **Implementation**: The `/search` endpoint in `main.py` uses `search_documents` to combine vector search with entity-based filtering via `qdrant_handler.search_entities`. The knowledge graph enhances queries targeting entities or relationships.
-  - **Example**: Querying “Who is the subcontractor for PS 54X?” retrieves chunks linked to “Varsity Plumbing and Heating, Inc.” via the “appears_in” relationship.
-- **Hybrid Approach**: Combines semantic and graph search results in `rank_results`, prioritizing chunks with high similarity and relevant entities/relationships.
+## Roadmap
+
+- ✅ OCR-aware chunk cleaning
+- ✅ Graph-enhanced search results
+- 🔜 ArangoDB or Neo4j graph backend
+- 🔜 Ollama / Local LLM support
+- 🔜 JWT authentication
+- 🔜 Dynamic embedding model selection (OpenAI, DeepSeek, Grok)
 
 ## License
+
 MIT License
 
 ## API Documentation
-See `api_docs.md` for FastAPI endpoint details.
+
+See [`api_docs.md`](./api_docs.md) for full endpoint usage.

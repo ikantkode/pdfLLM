@@ -27,7 +27,7 @@ class QdrantHandler:
                     vectors_config={"size": 1536, "distance": "Cosine"}
                 )
                 logger.info(f"Created collection: {self.collection_name}")
-                
+
                 # Create payload indexes for efficient filtering
                 self.client.create_payload_index(
                     collection_name=self.collection_name,
@@ -70,7 +70,7 @@ class QdrantHandler:
             logger.error(f"Failed to save chunk: {str(e)}")
             raise
 
-    async def search_entities(self, entities: List[str], user_id: str, file_id: Optional[str] = None, limit: int = 5) -> List[Any]:
+    async def search_entities(self, entities: List[str], user_id: str, file_ids: Optional[List[str]] = None, limit: int = 5) -> List[Any]:
         """Search for chunks containing specific entities"""
         try:
             results = []
@@ -85,11 +85,11 @@ class QdrantHandler:
                         match=MatchValue(value=user_id)
                     )
                 ]
-                if file_id:
+                if file_ids:
                     filter_conditions.append(
                         FieldCondition(
                             key="document_id",
-                            match=MatchValue(value=file_id)
+                            match=MatchValue(value=file_ids, match_any=True)
                         )
                     )
 
