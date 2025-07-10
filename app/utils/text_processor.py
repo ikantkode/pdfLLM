@@ -22,21 +22,73 @@ class TextProcessor:
         """Clean markdown text by removing excessive whitespace and special characters"""
         text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces with single space
         text = re.sub(r'#+', '#', text)   # Normalize headers
+        text = re.sub(r'(\w)\s+(\w)', r'\1\2', text)  # Fix spaced characters (e.g., "D z i u b a" → "Dziuba")
+        text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)  # Fix spaced numbers (e.g., "1 , 510 . 88" → "1,510.88")
         text = text.strip()
         return text
 
     def chunk_text(self, text: str, max_tokens: int = settings.max_embedding_tokens) -> List[Dict]:
-        """Split text into chunks with metadata"""
-        doc = self.nlp(text)
+        """Split text into chunks, preserving table structures"""
+        # Detect markdown tables
+        table_pattern = r'(\|.*?\|\n(?:\|[-: ]+\|\n)+.*?)(?=\n\n|\Z)'
+        tables = re.findall(table_pattern, text, re.DOTALL)
+        non_table_text = re.sub(table_pattern, 'TABLE_PLACEHOLDER', text)
+
         chunks = []
         current_chunk = ""
         token_count = 0
         chunk_index = 0
+        placeholder_count = 0
 
+        # Split non-table text by sentences
+        doc = self.nlp(non_table_text)
         for sent in doc.sents:
             sent_text = sent.text
-            sent_tokens = len(self.nlp.tokenizer(sent_text))
+            if 'TABLE_PLACEHOLDER' in sent_text:
+                # Replace placeholder with actual table
+                if placeholder_count < len(tables):
+                    table_text = tables[placeholder_count]
+                    table_tokens = len(self.nlp.tokenizer(table_text))
+                    if table_tokens > max_tokens:
+                        # Split table into rows
+                        rows = table_text.split('\n')
+                        sub_chunk = ""
+                        sub_tokens = 0
+                        for row in rows:
+                            row_tokens = len(self.nlp.tokenizer(row))
+                            if sub_tokens + row_tokens > max_tokens:
+                                if sub_chunk:
+                                    chunks.append({
+                                        "content": sub_chunk.strip(),
+                                        "chunk_index": chunk_index,
+                                        "parent_section": self._extract_section(sub_chunk),
+                                        "entities": [],
+                                        "relationships": []
+                                    })
+                                    chunk_index += 1
+                                    sub_chunk = ""
+                                    sub_tokens = 0
+                                sub_chunk += row + "\n"
+                                sub_tokens += row_tokens
+                            else:
+                                sub_chunk += row + "\n"
+                                sub_tokens += row_tokens
+                        if sub_chunk:
+                            chunks.append({
+                                "content": sub_chunk.strip(),
+                                "chunk_index": chunk_index,
+                                "parent_section": self._extract_section(sub_chunk),
+                                "entities": [],
+                                "relationships": []
+                            })
+                            chunk_index += 1
+                        placeholder_count += 1
+                        continue
+                    else:
+                        sent_text = sent_text.replace('TABLE_PLACEHOLDER', table_text)
+                        placeholder_count += 1
 
+            sent_tokens = len(self.nlp.tokenizer(sent_text))
             if token_count + sent_tokens > max_tokens:
                 if current_chunk:
                     chunks.append({
@@ -50,7 +102,7 @@ class TextProcessor:
                     current_chunk = ""
                     token_count = 0
 
-            current_chunk += sent_text + " "
+            current_chunk += sent_text + "\n"
             token_count += sent_tokens
 
         if current_chunk:
@@ -62,6 +114,55 @@ class TextProcessor:
                 "relationships": []
             })
 
+        # Add remaining tables
+        while placeholder_count < len(tables):
+            table_text = tables[placeholder_count]
+            table_tokens = len(self.nlp.tokenizer(table_text))
+            if table_tokens <= max_tokens:
+                chunks.append({
+                    "content": table_text.strip(),
+                    "chunk_index": chunk_index,
+                    "parent_section": self._extract_section(table_text),
+                    "entities": [],
+                    "relationships": []
+                })
+                chunk_index += 1
+            else:
+                # Split table into rows
+                rows = table_text.split('\n')
+                sub_chunk = ""
+                sub_tokens = 0
+                for row in rows:
+                    row_tokens = len(self.nlp.tokenizer(row))
+                    if sub_tokens + row_tokens > max_tokens:
+                        if sub_chunk:
+                            chunks.append({
+                                "content": sub_chunk.strip(),
+                                "chunk_index": chunk_index,
+                                "parent_section": self._extract_section(sub_chunk),
+                                "entities": [],
+                                "relationships": []
+                            })
+                            chunk_index += 1
+                            sub_chunk = ""
+                            sub_tokens = 0
+                        sub_chunk += row + "\n"
+                        sub_tokens += row_tokens
+                    else:
+                        sub_chunk += row + "\n"
+                        sub_tokens += row_tokens
+                if sub_chunk:
+                    chunks.append({
+                        "content": sub_chunk.strip(),
+                        "chunk_index": chunk_index,
+                        "parent_section": self._extract_section(sub_chunk),
+                        "entities": [],
+                        "relationships": []
+                    })
+                    chunk_index += 1
+            placeholder_count += 1
+
+        logger.debug(f"Chunked text into {len(chunks)} chunks")
         return chunks
 
     def _extract_section(self, text: str) -> str:

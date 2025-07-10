@@ -2,7 +2,7 @@ from PyPDF2 import PdfReader
 from pdf2image import convert_from_path
 import pytesseract
 import os
-from PIL import Image
+from PIL import Image, ImageEnhance
 from io import StringIO
 import pandas as pd
 from tabulate import tabulate
@@ -29,16 +29,38 @@ def correct_image_orientation(image):
         return image
 
 def normalize_text(text):
-    """Normalize text to fix common formatting issues, especially numbers."""
-    # Fix spaced numbers (e.g., "40 , 366 . 61" -> "40366.61")
+    """Normalize text to fix common OCR formatting issues"""
+    # Fix spaced numbers (e.g., "40 , 366 . 61" → "40366.61")
     text = re.sub(r'(\d)\s*,\s*(\d{3})\s*\.\s*(\d{2})', r'\1\2.\3', text)
-    # Fix numbers with spaces (e.g., "14 , 200" -> "14200")
+    # Fix numbers with spaces (e.g., "14 , 200" → "14200")
     text = re.sub(r'(\d)\s*,\s*(\d{3})', r'\1\2', text)
-    # Remove extra spaces around punctuation
-    text = re.sub(r'\s*([,.])\s*', r'\1', text)
+    # Fix spaces between characters in words (e.g., "D z i u b a" → "Dziuba")
+    text = re.sub(r'(\w)\s+(\w)', r'\1\2', text)
+    # Fix payroll-specific formats (e.g., "1,510.88Net1,143.20" → "Gross $1,510.88, Net $1,143.20")
+    text = re.sub(r'(\d+\.\d{2})Net(\d+\.\d{2})', r'Gross $\1, Net $\2', text)
+    text = re.sub(r'(\d+\.\d{2})\s*perhour', r'$\1 per hour', text, flags=re.IGNORECASE)
     # Normalize multiple spaces to single space
     text = re.sub(r'\s+', ' ', text)
+    # Remove extra spaces around punctuation
+    text = re.sub(r'\s*([,.])\s*', r'\1', text)
     return text.strip()
+
+def detect_table(text):
+    """Detect and structure table-like data from text"""
+    lines = text.split('\n')
+    table_data = []
+    headers = None
+    for line in lines:
+        # Split on spaces, but preserve multi-word names
+        cells = [cell.strip() for cell in line.split('  ') if cell.strip()]
+        if not cells:
+            continue
+        if not headers and len(cells) >= 4:  # Assume headers if row has multiple columns
+            headers = cells
+            table_data.append(headers)
+        elif headers and len(cells) >= len(headers) - 1:  # Allow for slightly irregular rows
+            table_data.append(cells[:len(headers)])
+    return table_data, headers
 
 def convert_to_markdown(file_path):
     try:
@@ -55,12 +77,14 @@ def convert_to_markdown(file_path):
             text = normalize_text(text)
             # Attempt to parse table-like data
             try:
-                # Split text into lines and detect potential table structure
-                lines = text.split('\n')
-                table_data = [line.split() for line in lines if line.strip()]
-                if len(table_data) > 1 and len(set(len(row) for row in table_data)) == 1:
-                    # Assume table structure if rows have consistent column counts
-                    df = pd.DataFrame(table_data[1:], columns=table_data[0])
+                table_data, headers = detect_table(text)
+                if table_data and headers:
+                    # Ensure consistent column count
+                    max_cols = len(headers)
+                    for row in table_data:
+                        while len(row) < max_cols:
+                            row.append("")
+                    df = pd.DataFrame(table_data[1:], columns=headers)
                     markdown = f"# PDF Content\n\n{tabulate(df, headers='keys', tablefmt='pipe')}\n\n## Raw Text\n\n{text}"
                 else:
                     markdown = f"# PDF Content\n\n{text}"
@@ -77,13 +101,22 @@ def convert_to_markdown(file_path):
             # Correct orientation
             image = correct_image_orientation(image)
             # Enhance contrast for better OCR
-            from PIL import ImageEnhance
             image = ImageEnhance.Contrast(image).enhance(2.0)
             # Perform OCR
             text = pytesseract.image_to_string(image)
             # Normalize OCR output
             text = normalize_text(text)
-            markdown += f"## Page {i+1}\n\n{text}\n\n"
+            # Attempt table detection
+            table_data, headers = detect_table(text)
+            if table_data and headers:
+                max_cols = len(headers)
+                for row in table_data:
+                    while len(row) < max_cols:
+                        row.append("")
+                df = pd.DataFrame(table_data[1:], columns=headers)
+                markdown += f"## Page {i+1}\n\n{tabulate(df, headers='keys', tablefmt='pipe')}\n\n### Raw Text\n\n{text}\n\n"
+            else:
+                markdown += f"## Page {i+1}\n\n{text}\n\n"
         
         return markdown
     
