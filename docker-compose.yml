@@ -11,7 +11,6 @@ services:
       - ./data/logs:/app/data/logs
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
       - DGRAPH_TOKEN=${DGRAPH_TOKEN}
     depends_on:
       dgraph:
@@ -29,7 +28,6 @@ services:
       - ./data/logs:/app/data/logs
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
       - DGRAPH_TOKEN=${DGRAPH_TOKEN}
     depends_on:
       rag-service:
