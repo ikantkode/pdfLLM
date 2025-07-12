@@ -6,7 +6,7 @@
 
 The system combines:
 - 📚 **Semantic Search**: Embedding-based retrieval using OpenAI.
-- 🧠 **Graph-Based Search**: Entity and relationship indexing via NetworkX.
+- 🧠 **Graph-Based Search**: Entity and relationship indexing via dgraph.
 - 💬 **LLM-Powered Answers**: Uses OpenAI chat models to generate accurate, cited responses.
 - 📊 **Hybrid Retrieval**: Combines vector similarity and entity relationships for precision.
 
@@ -34,9 +34,6 @@ mv env_example .env  # add your OpenAI and Qdrant configs
 docker compose up -d --build
 ```
 
-- Visit: http://localhost:8000/docs (API docs)
-- Visit: http://localhost:8000/health (health check)
-
 ## Example Use Cases
 
 - Extract payroll details from messy scanned PDFs.
@@ -47,7 +44,7 @@ docker compose up -d --build
 
 - ✅ OCR-aware chunk cleaning
 - ✅ Graph-enhanced search results
-- ✅Replace networkx with dgraph
+- ✅ Replace networkx with dgraph
 - 🔜 Ollama / Local LLM support
 - 🔜 JWT authentication
 - 🔜 Dynamic embedding model selection (OpenAI, DeepSeek, Grok)
