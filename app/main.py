@@ -6,6 +6,8 @@ import base64
 import datetime
 import hashlib
 import re
+from config import settings
+from pydgraph import RetriableError
 from typing import List, Dict, Optional, Any
 from io import BytesIO
 from pathlib import Path
@@ -24,11 +26,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from fastapi.encoders import jsonable_encoder
 import tiktoken
-import networkx as nx
-from tenacity import retry, stop_after_attempt, wait_exponential
+import pydgraph
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from openai import OpenAI
 from pydantic import BaseModel
-from config import settings
 from utils.qdrant_handler import QdrantHandler
 from utils.text_processor import TextProcessor
 from utils.ocr_processor import OCRProcessor
@@ -160,8 +161,44 @@ class SearchResult(BaseModel):
 # Knowledge Graph for advanced indexing
 class KnowledgeGraph:
     def __init__(self):
-        self.graph = nx.DiGraph()
+        # Updated connection syntax for pydgraph 24.2.1+
+        self.client = pydgraph.DgraphClient(
+            pydgraph.DgraphClientStub(f"{settings.dgraph_host}:{settings.dgraph_port}")
+        )
+        self._initialize_schema()
         self.entity_index = {}
+
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=4, max=20),
+        retry=retry_if_exception_type(RetriableError)
+    )
+    def _initialize_schema(self):
+        """Initialize Dgraph schema for knowledge graph with retry logic"""
+        schema = """
+            type Entity {
+                name
+                type
+                appears_in
+            }
+            type Document {
+                document_id
+            }
+            name: string @index(exact) .
+            type: string @index(exact) .
+            document_id: string @index(exact) .
+            appears_in: [uid] @reverse .
+            relationship: [uid] @reverse .
+            predicate: string .
+            weight: float .
+        """
+        try:
+            op = pydgraph.Operation(schema=schema)
+            self.client.alter(op)
+            logger.info("Dgraph schema initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Dgraph schema: {str(e)}")
+            raise
 
     def add_relationship(
         self,
@@ -170,18 +207,106 @@ class KnowledgeGraph:
         relationship: str,
         weight: float = 1.0
     ) -> None:
-        """Add a relationship between entities"""
+        """Add a relationship between entities or entity and document"""
+        # Sanitize source and target to remove problematic characters
+        source = re.sub(r'[\n\r\t]', ' ', source).strip()
+        target = re.sub(r'[\n\r\t]', ' ', target).strip()
+        source = re.sub(r'\s+', ' ', source)
+        target = re.sub(r'\s+', ' ', target)
+        
+        # Skip if source or target is empty, too long, or contains metadata keywords
+        if (not source or not target or len(source) > 255 or len(target) > 255 or
+            re.search(r'\b(Date|Signature)\b', source, re.IGNORECASE) or
+            re.search(r'\b(Date|Signature)\b', target, re.IGNORECASE)):
+            logger.warning(f"Skipping invalid relationship: source='{source}', target='{target}', relationship='{relationship}'")
+            return
+
         logger.debug(f"Adding relationship: {source} -> {relationship} -> {target}")
-        if source not in self.graph:
-            self.graph.add_node(source, type='entity')
-        if target not in self.graph:
-            self.graph.add_node(target, type='entity')
-        self.graph.add_edge(
-            source,
-            target,
-            relationship=relationship,
-            weight=weight
-        )
+        txn = self.client.txn()
+        try:
+            # Check if source entity exists
+            query = f"""
+                query {{
+                    source(func: eq(name, "{source}")) {{
+                        uid
+                        name
+                        type
+                    }}
+                }}
+            """
+            res = txn.query(query)
+            source_node = json.loads(res.json).get("source", [])
+
+            if not source_node:
+                source_node = {
+                    "uid": "_:source",
+                    "name": source,
+                    "type": "entity"
+                }
+                mutation = {
+                    "uid": "_:source",
+                    "name": source,
+                    "type": "entity"
+                }
+            else:
+                source_node = source_node[0]
+                mutation = {"uid": source_node["uid"]}
+
+            # Check if target is a document or entity
+            query = f"""
+                query {{
+                    target(func: eq(document_id, "{target}")) {{
+                        uid
+                        document_id
+                    }}
+                    entity(func: eq(name, "{target}")) {{
+                        uid
+                        name
+                        type
+                    }}
+                }}
+            """
+            res = txn.query(query)
+            target_data = json.loads(res.json)
+            target_node = target_data.get("target", []) or target_data.get("entity", [])
+
+            if not target_node:
+                target_node = {
+                    "uid": "_:target",
+                    "name": target,
+                    "type": "entity"
+                }
+                mutation["relationship"] = [{
+                    "uid": "_:target",
+                    "name": target,
+                    "type": "entity",
+                    "predicate": relationship,
+                    "weight": weight
+                }]
+            else:
+                target_node = target_node[0]
+                if "document_id" in target_node:
+                    mutation["appears_in"] = [{
+                        "uid": target_node["uid"],
+                        "document_id": target,
+                        "predicate": relationship,
+                        "weight": weight
+                    }]
+                else:
+                    mutation["relationship"] = [{
+                        "uid": target_node["uid"],
+                        "predicate": relationship,
+                        "weight": weight
+                    }]
+
+            # Perform mutation
+            txn.mutate(set_obj=mutation)
+            txn.commit()
+            logger.debug(f"Added relationship: {source} -> {relationship} -> {target}")
+        except Exception as e:
+            logger.error(f"Failed to add relationship: {source} -> {relationship} -> {target}, error: {str(e)}")
+        finally:
+            txn.discard()
 
     def find_related_entities(
         self,
@@ -189,34 +314,44 @@ class KnowledgeGraph:
         depth: int = settings.max_graph_depth
     ) -> List[str]:
         """Find related entities within specified depth"""
-        if entity not in self.graph:
+        # Sanitize entity input
+        entity = re.sub(r'[\n\r\t]', ' ', entity).strip()
+        entity = re.sub(r'\s+', ' ', entity)
+        if not entity or len(entity) > 255 or re.search(r'\b(Date|Signature)\b', entity, re.IGNORECASE):
+            logger.warning(f"Invalid entity for search: {entity}")
             return []
-        return list(nx.single_source_shortest_path_length(
-            self.graph,
-            entity,
-            cutoff=depth
-        ).keys())
+
+        txn = self.client.txn(read_only=True)
+        try:
+            query = f"""
+                query {{
+                    var(func: eq(name, "{entity}")) {{
+                        e as uid
+                    }}
+                    related(func: uid(e)) @recurse(depth: {depth}, loop: false) {{
+                        name
+                        ~relationship
+                        ~appears_in
+                    }}
+                }}
+            """
+            res = txn.query(query)
+            data = json.loads(res.json).get("related", [])
+            entities = [item["name"] for item in data if item.get("name") and item.get("type") == "entity"]
+            return entities
+        except Exception as e:
+            logger.error(f"Failed to find related entities: {str(e)}")
+            return []
+        finally:
+            txn.discard()
 
     def save(self) -> None:
-        """Save graph to file"""
-        data = nx.node_link_data(self.graph)
-        try:
-            with open(settings.graph_file, 'w') as f:
-                json.dump(data, f)
-            logger.info("Knowledge graph saved successfully")
-        except Exception as e:
-            logger.error(f"Failed to save knowledge graph: {str(e)}")
+        """No-op: Dgraph handles persistence natively"""
+        logger.info("Dgraph handles persistence, no explicit save needed")
 
     def load(self) -> None:
-        """Load graph from file"""
-        if os.path.exists(settings.graph_file):
-            try:
-                with open(settings.graph_file, 'r') as f:
-                    data = json.load(f)
-                    self.graph = nx.node_link_graph(data)
-                logger.info("Knowledge graph loaded successfully")
-            except Exception as e:
-                logger.error(f"Failed to load knowledge graph: {str(e)}")
+        """No-op: Dgraph handles persistence natively"""
+        logger.info("Dgraph handles persistence, no explicit load needed")
 
 knowledge_graph = KnowledgeGraph()
 
@@ -237,7 +372,6 @@ class StateManager:
         try:
             with open(self.state_file, "w") as f:
                 json.dump(jsonable_encoder(state), f)
-            knowledge_graph.save()
             logger.info("State saved successfully")
         except Exception as e:
             logger.error(f"Failed to save state: {str(e)}")
@@ -250,7 +384,6 @@ class StateManager:
                     state = json.load(f)
                     self.file_metadata = state.get("file_metadata", [])
                     self.chat_sessions = state.get("chat_sessions", {})
-                knowledge_graph.load()
                 logger.info("State loaded successfully")
             except Exception as e:
                 logger.error(f"Failed to load state: {str(e)}")
@@ -272,7 +405,6 @@ def get_file_converter(file_ext: str):
 
 def split_large_text(text: str, max_tokens: int = settings.max_embedding_tokens) -> List[str]:
     """Split text into chunks, preserving table structures and semantic units"""
-    # Detect markdown tables
     table_pattern = r'(\|.*?\|\n(?:\|[-: ]+\|\n)+.*?)(?=\n\n|\Z)'
     tables = re.findall(table_pattern, text, re.DOTALL)
     non_table_text = re.sub(table_pattern, 'TABLE_PLACEHOLDER', text)
@@ -282,12 +414,10 @@ def split_large_text(text: str, max_tokens: int = settings.max_embedding_tokens)
     token_count = 0
     placeholder_count = 0
 
-    # Split non-table text by sentences
     doc = text_processor.nlp(non_table_text)
     for sent in doc.sents:
         sent_text = sent.text
         if 'TABLE_PLACEHOLDER' in sent_text:
-            # Replace placeholder with actual table
             if placeholder_count < len(tables):
                 sent_text = sent_text.replace('TABLE_PLACEHOLDER', tables[placeholder_count])
                 placeholder_count += 1
@@ -299,7 +429,6 @@ def split_large_text(text: str, max_tokens: int = settings.max_embedding_tokens)
                 current_chunk = ""
                 token_count = 0
             if sent_tokens > max_tokens:
-                # Split large sentence further
                 sub_chunks = [sent_text[i:i + max_tokens] for i in range(0, len(sent_text), max_tokens)]
                 chunks.extend(sub_chunks)
                 continue
@@ -310,13 +439,11 @@ def split_large_text(text: str, max_tokens: int = settings.max_embedding_tokens)
     if current_chunk:
         chunks.append(current_chunk.strip())
 
-    # Add remaining tables
     while placeholder_count < len(tables):
         table_tokens = len(tokenizer.encode(tables[placeholder_count]))
         if table_tokens <= max_tokens:
             chunks.append(tables[placeholder_count])
         else:
-            # Split large table into rows
             rows = tables[placeholder_count].split('\n')
             sub_chunk = ""
             sub_tokens = 0
@@ -349,8 +476,8 @@ def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
     try:
         client = OpenAI(api_key=settings.openai_api_key)
         response = client.embeddings.create(
-            model=settings.embedding_model,
-            input=texts
+            input=texts,
+            model=settings.embedding_model
         )
         return [item.embedding for item in response.data]
     except Exception as e:
@@ -363,8 +490,7 @@ def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
     reraise=True
 )
 async def preprocess_ocr_text(text: str) -> str:
-    """Use LLM to clean and reconstruct OCR-extracted text into coherent sentences."""
-    # Split large text to avoid token limits, preserving tables
+    """Use LLM to clean and reconstruct OCR-extracted text into coherent sentences"""
     chunks = split_large_text(text, max_tokens=settings.max_embedding_tokens // 2)
     cleaned_chunks = []
 
@@ -372,51 +498,47 @@ async def preprocess_ocr_text(text: str) -> str:
     for chunk in chunks:
         try:
             prompt = (
-                        f"Input Text:\n{chunk}\n\n"
-            "You are an intelligent document cleaner. The input text may contain OCR errors such as:\n"
-            "- Extra spaces between characters (e.g., 'D z i u b a', '5 0 . 4 3')\n"
-            "- Malformed numbers (e.g., '1 , 98 . 16', '$$50.43', '7,068.92Net5,079.50')\n"
-            "- Repeated words, misaligned formatting, or broken names (e.g., 'E r m i l o L o p e z')\n"
-            "- Incomplete, gibberish, or disorganized text\n\n"
-
-            "Your tasks are:\n"
-            "1. **Reconstruct** the text into clear, grammatically correct, and logically structured content.\n"
-            "2. **Fix character spacing** in names, words, and numbers.\n"
-            "3. **Standardize numbers and currency** formatting (e.g., '1 , 98 . 16' → '$1,988.16'). Use a single `$` where needed.\n"
-            "4. **Rejoin broken names or words** (e.g., 'E r m i l o L o p e z' → 'Ermilo Lopez').\n"
-            "5. **Preserve markdown** formatting such as headings, lists, and tables. Ensure tables are well-aligned.\n"
-            "6. **If the input contains payroll-related information** (such as employee names, hours, pay rates, gross/net pay):\n"
-            "   - Extract the relevant data and structure it in a markdown table.\n"
-            "   - Columns should include: `Employee`, `Role`, `Hours`, `Rate`, `Gross Pay`, `Net Pay`.\n"
-            "   - Ensure Gross Pay = Hours × Rate, and Net Pay < Gross Pay. Make reasonable assumptions and note them if necessary.\n"
-            "7. **If the input is not payroll-related**, simply clean and format the content into readable markdown, preserving any headings, paragraphs, or lists.\n"
-            "8. **Remove noise or gibberish**, but preserve all meaningful data.\n"
-            "9. **Comment assumptions** using HTML comments (e.g., `<!-- Assumed currency as USD -->`).\n"
-            "10. **Return only the cleaned text in markdown format**.\n\n"
-
-            "Example Input (Payroll):\n"
-            "Z e n o v i i D z i u b a L a b o r e r 1 6 h o u r s 9 4 . 4 3 p e r h o u r 1 , 5 1 0 . 8 8 N e t 1 , 1 4 3 . 2 0\n"
-            "E r m i l o L o p e z L a b o r e r 8 h o u r s 9 4 . 4 3 p e r h o u r 7 5 5 . 4 4 N e t 6 0 8 . 6 5\n\n"
-            
-            "Example Output (Payroll):\n"
-            "```markdown\n"
-            "## Payroll Details\n"
-            "| Employee        | Role     | Hours | Rate             | Gross Pay | Net Pay  |\n"
-            "|-----------------|----------|-------|------------------|-----------|----------|\n"
-            "| Zenovii Dziuba  | Laborer  | 16    | $94.43 per hour  | $1,510.88 | $1,143.20|\n"
-            "| Ermilo Lopez    | Laborer  | 8     | $94.43 per hour  | $755.44   | $608.65  |\n"
-            "<!-- Assumed currency as USD -->\n"
-            "```\n\n"
-
-            "Example Input (Non-payroll):\n"
-            "T h e   p r o j e c t   w a s   i n i t i a t e d   o n   0 5 . 0 6 . 2 0 2 3   a n d   i n v o l v e d   r e g u l a r   s a f e t y   i n s p e c t i o n s .\n"
-
-            "Example Output (Non-payroll):\n"
-            "```markdown\n"
-            "The project was initiated on 05.06.2023 and involved regular safety inspections.\n"
-            "```\n"
+                f"Input Text:\n{chunk}\n\n"
+                "You are an intelligent document cleaner. The input text may contain OCR errors such as:\n"
+                "- Extra spaces between characters (e.g., 'D z i u b a', '5 0 . 4 3')\n"
+                "- Malformed numbers (e.g., '1 , 98 . 16', '$$50.43', '7,068.92Net5,079.50')\n"
+                "- Repeated words, misaligned formatting, or broken names (e.g., 'E r m i l o L o p e z')\n"
+                "- Incorrectly combined metadata (e.g., 'Aslam Baig \nDate' instead of separating name and date)\n"
+                "- Incomplete, gibberish, or disorganized text\n\n"
+                "Your tasks are:\n"
+                "1. **Reconstruct** the text into clear, grammatically correct, and logically structured content.\n"
+                "2. **Fix character spacing** in names, words, and numbers.\n"
+                "3. **Standardize numbers and currency** formatting (e.g., '1 , 98 . 16' → '$1,988.16'). Use a single `$` where needed.\n"
+                "4. **Rejoin broken names or words** (e.g., 'E r m i l o L o p e z' → 'Ermilo Lopez').\n"
+                "5. **Separate metadata** like 'Date' or 'Signature' from names (e.g., 'Aslam Baig \nDate' → 'Aslam Baig').\n"
+                "6. **Preserve markdown** formatting such as headings, lists, and tables. Ensure tables are well-aligned.\n"
+                "7. **If the input contains payroll-related information** (such as employee names, hours, pay rates, gross/net pay):\n"
+                "   - Extract the relevant data and structure it in a markdown table.\n"
+                "   - Columns should include: `Employee`, `Role`, `Hours`, `Rate`, `Gross Pay`, `Net Pay`.\n"
+                "   - Ensure Gross Pay = Hours × Rate, and Net Pay < Gross Pay. Make reasonable assumptions and note them if necessary.\n"
+                "8. **If the input is not payroll-related**, simply clean and format the content into readable markdown, preserving any headings, paragraphs, or lists.\n"
+                "9. **Remove noise or gibberish**, but preserve all meaningful data.\n"
+                "10. **Comment assumptions** using HTML comments (e.g., `<!-- Assumed currency as USD -->`).\n"
+                "11. **Return only the cleaned text in markdown format**.\n\n"
+                "Example Input (Payroll):\n"
+                "Z e n o v i i D z i u b a L a b o r e r 1 6 h o u r s 9 4 . 4 3 p e r h o u r 1 , 5 1 0 . 8 8 N e t 1 , 1 4 3 . 2 0\n"
+                "E r m i l o L o p e z L a b o r e r 8 h o u r s 9 4 . 4 3 p e r h o u r 7 5 5 . 4 4 N e t 6 0 8 . 6 5\n"
+                "Aslam Baig \nDate\n\n"
+                "Example Output (Payroll):\n"
+                "## Payroll Details\n"
+                "| Employee        | Role     | Hours | Rate             | Gross Pay | Net Pay  |\n"
+                "|-----------------|----------|-------|------------------|-----------|----------|\n"
+                "| Zenovii Dziuba  | Laborer  | 16    | $94.43 per hour  | $1,510.88 | $1,143.20|\n"
+                "| Ermilo Lopez    | Laborer  | 8     | $94.43 per hour  | $755.44   | $608.65  |\n"
+                "<!-- Assumed currency as USD -->\n"
+                "<!-- Signature: Aslam Baig, Date field ignored as metadata -->\n\n"
+                "Example Input (Non-payroll):\n"
+                "T h e   p r o j e c t   w a s   i n i t i a t e d   o n   0 5 . 0 6 . 2 0 2 3   a n d   i n v o l v e d   r e g u l a r   s a f e t y   i n s p e c t i o n s .\n"
+                "Aslam Baig \nDate\n"
+                "Example Output (Non-payroll):\n"
+                "The project was initiated on 05.06.2023 and involved regular safety inspections.\n"
+                "<!-- Signature: Aslam Baig, Date field ignored as metadata -->\n"
             )
-
             response = client.chat.completions.create(
                 model=settings.chat_model,
                 messages=[
@@ -425,6 +547,7 @@ async def preprocess_ocr_text(text: str) -> str:
                         "content": (
                             "You are an expert at cleaning and reconstructing noisy OCR-extracted text. "
                             "Correct OCR errors, including spaces between characters in words, names, or numbers. "
+                            "Separate names from metadata like 'Date' or 'Signature' (e.g., 'Aslam Baig \nDate' → 'Aslam Baig'). "
                             "Format numbers and names properly, ensuring single '$' for currency, and structure the output in clear, coherent markdown. "
                             "Preserve meaningful information and structural elements (e.g., lists, tables). "
                             "For payroll data, format details in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay. "
@@ -444,7 +567,6 @@ async def preprocess_ocr_text(text: str) -> str:
             logger.error(f"Failed to preprocess OCR chunk: {str(e)}")
             raise
 
-    # Combine cleaned chunks
     cleaned_text = "\n\n".join(cleaned_chunks)
     logger.debug(f"Preprocessed OCR text: {cleaned_text[:500]}...")
     return cleaned_text
@@ -453,18 +575,15 @@ def clean_response(text: str) -> str:
     """Clean the LLM response to fix residual OCR artifacts and table formatting"""
     logger.debug(f"Raw response before cleaning: {text[:500]}...")
 
-    # Fix spaces between characters in words, names, or numbers, but preserve spaces between words
-    text = re.sub(r'(\w)\s{2,}(\w)', r'\1 \2', text)  # Fix multiple spaces between words
-    text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)  # Fix spaced numbers (e.g., "1 , 510 . 88" → "1,510.88")
-    text = re.sub(r'(\w)\s+([.,:;])\s+(\w)', r'\1\2\3', text)  # Fix spaced punctuation (e.g., "C P R . p d f" → "CPR.pdf")
-    text = re.sub(r'\b(\w)\s+(\w)\s+(\w)\s+(\w)\b', r'\1\2\3\4', text)  # Fix spaced words (e.g., "N e t P a y" → "NetPay")
-    text = re.sub(r'\${2,}', r'$', text)  # Fix double dollar signs (e.g., "$$94.43" → "$94.43")
+    text = re.sub(r'(\w)\s{2,}(\w)', r'\1 \2', text)
+    text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)
+    text = re.sub(r'(\w)\s+([.,:;])\s+(\w)', r'\1\2\3', text)
+    text = re.sub(r'\b(\w)\s+(\w)\s+(\w)\s+(\w)\b', r'\1\2\3\4', text)
+    text = re.sub(r'\${2,}', r'$', text)
 
-    # Fix payroll-specific formats
     text = re.sub(r'(\d+\.\d{2})\s*N\s*e\s*t\s*(\d+\.\d{2})', r'Gross $\1, Net $\2', text, flags=re.IGNORECASE)
     text = re.sub(r'(\d+\.\d{2})\s*p\s*e\s*r\s*h\s*o\s*u\s*r', r'$\1 per hour', text, flags=re.IGNORECASE)
 
-    # Validate and correct table numerical consistency
     lines = text.split('\n')
     cleaned_lines = []
     in_table = False
@@ -476,17 +595,16 @@ def clean_response(text: str) -> str:
         if line.strip().startswith('|') and not in_table:
             in_table = True
             table_lines = [line]
-        elif in_table and line.strip().startswith('|'):
+        elif in_table and line.strip().startsWith('|'):
             table_lines.append(line)
         elif in_table and not line.strip().startswith('|'):
             in_table = False
-            # Clean and validate table
             cleaned_table = []
             header = None
             net_pay_values = []
             for table_line in table_lines:
                 cells = [re.sub(r'(\w)\s{2,}(\w)', r'\1 \2', cell.strip()) for cell in table_line.split('|')]
-                cells = [re.sub(r'\${2,}', r'$', cell) for cell in cells]  # Fix $$ in table cells
+                cells = [re.sub(r'\${2,}', r'$', cell) for cell in cells]
                 if not header and "Employee" in cells:
                     header = cells
                     cleaned_table.append('|'.join(cells))
@@ -500,7 +618,6 @@ def clean_response(text: str) -> str:
                         rate = float(re.search(r'\d+\.\d{2}', rate_str).group()) if rate_str and re.search(r'\d+\.\d{2}', rate_str) else 0.0
                         gross = float(re.search(r'\d+\.\d{2}', gross_str).group()) if gross_str and re.search(r'\d+\.\d{2}', gross_str) else 0.0
                         net = float(re.search(r'\d+\.\d{2}', net_str).group()) if net_str and re.search(r'\d+\.\d{2}', net_str) else 0.0
-                        # Validate: Gross Pay = Hours × Rate, Net Pay < Gross Pay
                         expected_gross = hours * rate
                         if abs(expected_gross - gross) > 0.01:
                             logger.warning(f"Inconsistent gross pay: {gross} != {hours} × {rate} = {expected_gross}")
@@ -522,13 +639,12 @@ def clean_response(text: str) -> str:
             cleaned_lines.append(line)
 
     if in_table:
-        # Clean remaining table
         cleaned_table = []
         header = None
         net_pay_values = []
         for table_line in table_lines:
             cells = [re.sub(r'(\w)\s{2,}(\w)', r'\1 \2', cell.strip()) for cell in table_line.split('|')]
-            cells = [re.sub(r'\${2,}', r'$', cell) for cell in cells]  # Fix $$ in table cells
+            cells = [re.sub(r'\${2,}', r'$', cell) for cell in cells]
             if not header and "Employee" in cells:
                 header = cells
                 cleaned_table.append('|'.join(cells))
@@ -557,20 +673,17 @@ def clean_response(text: str) -> str:
             cleaned_table.append('|'.join(cells))
         cleaned_lines.extend(cleaned_table)
 
-    # Normalize whitespace
     text = '\n'.join(cleaned_lines)
     text = re.sub(r'[ \t]+', ' ', text)
     text = re.sub(r'\n[ \t]+', '\n', text)
     text = re.sub(r'[ \t]+\n', '\n', text)
     text = text.strip()
 
-    # Fix spaced characters in total expenditure line
     text = re.sub(r'G r o s s\s+P a y', 'Gross Pay', text)
     text = re.sub(r'N e t\s+P a y', 'Net Pay', text)
-    text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)  # Fix spaced numbers in totals
-    text = re.sub(r'\${2,}', r'$', text)  # Fix double dollar signs in totals
+    text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)
+    text = re.sub(r'\${2,}', r'$', text)
 
-    # Append corrected totals only if a table was processed and totals are present
     if total_gross > 0 and total_net > 0:
         text = re.sub(
             r'Total expenditure:.*$',
@@ -610,8 +723,8 @@ def rank_results(entity_results: List, vector_results: List, limit: int) -> List
         if result_id and result_id not in seen:
             seen.add(result_id)
             score = (result.score if hasattr(result, 'score') else result.get('score', 0.0))
-            score += 0.1 * len(result.payload.get('entities', []))  # Boost for entities
-            score += 0.2 * len(result.payload.get('relationships', []))  # Boost for relationships
+            score += 0.1 * len(result.payload.get('entities', []))
+            score += 0.2 * len(result.payload.get('relationships', []))
             result.score = score
             combined.append(result)
 
@@ -623,32 +736,17 @@ def rank_results(entity_results: List, vector_results: List, limit: int) -> List
 
 def clean_query(query: str) -> str:
     """Clean user query to handle OCR-like noise and payroll-specific formatting"""
-    # Normalize whitespace
-    query = re.sub(r'\s+', ' ', query).strip()
-    
-    # Remove excessive special characters
+    query = re.sub(r'[\n\r\t]', ' ', query).strip()
+    query = re.sub(r'\s+', ' ', query)
     query = re.sub(r'([^\w\s])\1+', r'\1', query)
-    
-    # Remove repeated words/phrases
     query = re.sub(r'\b(\w+)\s+\1\b', r'\1', query, flags=re.IGNORECASE)
-    
-    # Remove invalid characters, preserving common punctuation and currency
     query = re.sub(r'[^\w\s\.\,\$\(\)\-]', '', query)
-    
-    # Fix malformed numbers
     query = re.sub(r'(\d+),(\d{2})\.(\d{2})', r'\1\2.\3', query)
-    
-    # Correct payroll-specific formats
     query = re.sub(r'(\d+\.\d{2})Net(\d+\.\d{2})', r'Gross $\1, Net $\2', query)
     query = re.sub(r'(\d+\.\d{2})\s*perhour', r'$\1 per hour', query, flags=re.IGNORECASE)
-    
-    # Fix fragmented names
     query = re.sub(r'\b(\w)\s+(\w)\s+(\w)\s+(\w)\s+(\w)\b', r'\1\2\3\4\5', query)
     query = re.sub(r'\b(\w)\s+(\w)\s+(\w)\s+(\w)\b', r'\1\2\3\4', query)
-    
-    # Fix document names
     query = re.sub(r'CPRPreviewSCA\s*\((\d+)\)\.pdf', r'CPRPreviewSCA_\1.pdf', query)
-    
     logger.debug(f"Cleaned query: {query}")
     return query
 
@@ -661,13 +759,12 @@ async def build_chat_context(results: List[SearchResult]) -> str:
 
     for result in results:
         content = result.content
-        # Re-clean retrieved content to handle any residual noise
-        cleaned_content = re.sub(r'(\w)\s{2,}(\w)', r'\1 \2', content)  # Fix multiple spaces
-        cleaned_content = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', cleaned_content)  # Fix spaced numbers
-        cleaned_content = re.sub(r'\${2,}', r'$', cleaned_content)  # Fix double dollar signs
-        cleaned_content = re.sub(r'\s+', ' ', cleaned_content).strip()  # Normalize whitespace
-        
-        # Skip empty or duplicate content
+        cleaned_content = re.sub(r'[\n\r\t]', ' ', content).strip()
+        cleaned_content = re.sub(r'(\w)\s{2,}(\w)', r'\1 \2', cleaned_content)
+        cleaned_content = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', cleaned_content)
+        cleaned_content = re.sub(r'\${2,}', r'$', cleaned_content)
+        cleaned_content = re.sub(r'\s+', ' ', cleaned_content).strip()
+
         if not cleaned_content or cleaned_content in seen_content:
             logger.debug(f"Skipped content: {cleaned_content[:100]}...")
             continue
@@ -727,7 +824,6 @@ def generate_coherent_response(query: str, context: str) -> str:
 
 <!-- Assumed currency as USD based on context -->"""
     )
-
     try:
         response = client.chat.completions.create(
             model=settings.chat_model,
@@ -754,7 +850,7 @@ def generate_coherent_response(query: str, context: str) -> str:
             temperature=0.3
         )
         response_text = response.choices[0].message.content.strip()
-        response_text = clean_response(response_text)  # Apply post-processing
+        response_text = clean_response(response_text)
         logger.debug(f"Generated response: {response_text[:500]}...")
         return response_text
     except Exception as e:
@@ -791,7 +887,6 @@ async def process_file(
             detail=f"File size exceeds {settings.max_document_size//(1024*1024)}MB limit"
         )
 
-    # Check for existing file
     existing_file = next(
         (f for f in state_manager.file_metadata
          if f['filename'] == file.filename and f['user_id'] == user_id),
@@ -810,11 +905,9 @@ async def process_file(
     temp_path = Path(settings.temp_upload_dir) / f"{file_id}{file_ext}"
 
     try:
-        # Save and convert file
         file_content = await file.read()
         temp_path.write_bytes(file_content)
 
-        # Use OCR for PDFs, existing converters for other formats
         if file_ext in settings.supported_extensions['pdfs']:
             logger.info(f"Processing PDF {file.filename} with OCR")
             markdown_content = ocr_processor.process_pdf(str(temp_path))
@@ -827,28 +920,24 @@ async def process_file(
                 )
             markdown_content = converter(str(temp_path))
 
-        # Preprocess OCR text for images and PDFs
         is_ocr_likely = file_ext in settings.supported_extensions['images'] or file_ext in settings.supported_extensions['pdfs']
         if is_ocr_likely:
             cleaned_markdown = await preprocess_ocr_text(markdown_content)
         else:
             cleaned_markdown = text_processor.clean_markdown(markdown_content)
 
-        # Generate embeddings for chunks
         chunk_embeddings = await text_processor.generate_embeddings(cleaned_markdown)
         if not chunk_embeddings:
             raise ValueError("No embeddings generated for the document")
 
-        # Store each chunk in Qdrant
         for i, (chunk_text, embedding) in enumerate(chunk_embeddings):
-            # Generate a valid UUID for the chunk
             chunk_id = str(uuid.uuid5(uuid.UUID(file_id), f"chunk_{i}"))
-            
-            # Extract entities and relationships for this chunk
             entities = await text_processor.extract_entities(chunk_text)
             relationships = await text_processor.extract_relationships({"content": chunk_text, "chunk_index": i})
 
-            # Store in Qdrant
+            logger.debug(f"Chunk {i} entities: {entities}")
+            logger.debug(f"Chunk {i} relationships: {relationships}")
+
             qdrant_handler.store_chunk(
                 document_id=file_id,
                 chunk_id=chunk_id,
@@ -864,7 +953,6 @@ async def process_file(
                 }
             )
 
-            # Index entities and relationships in knowledge graph
             for entity in entities:
                 knowledge_graph.add_relationship(
                     source=entity,
@@ -879,7 +967,6 @@ async def process_file(
                     relationship=rel['predicate']
                 )
 
-        # Store metadata
         state_manager.file_metadata.append({
             "file_id": file_id,
             "filename": file.filename,
@@ -922,12 +1009,10 @@ async def search_documents(
 ):
     """Search documents with dual-level retrieval"""
     try:
-        # Clean query before processing
         cleaned_query = clean_query(query)
         logger.debug(f"Original query: {query}")
         logger.debug(f"Cleaned query for search: {cleaned_query}")
-        
-        # Entity-based retrieval from knowledge graph
+
         entity_results = []
         if use_graph:
             entities = await text_processor.extract_entities(cleaned_query)
@@ -943,7 +1028,6 @@ async def search_documents(
                         )
                     )
 
-        # Vector-based retrieval
         query_chunks = split_large_text(cleaned_query)
         vector_results = []
 
@@ -967,7 +1051,6 @@ async def search_documents(
             )
             vector_results.extend(results)
 
-        # Combine and rank results
         combined_results = rank_results(entity_results, vector_results, limit)
 
         return {
@@ -989,12 +1072,10 @@ async def chat_with_documents(
 ):
     """Chat with document context"""
     try:
-        # Clean query before processing
         cleaned_query = clean_query(query)
         logger.debug(f"Original query: {query}")
         logger.debug(f"Cleaned query for chat: {cleaned_query}")
 
-        # Perform dual-level retrieval
         search_results = await search_documents(
             query=cleaned_query,
             user_id=user_id,
@@ -1010,13 +1091,9 @@ async def chat_with_documents(
                 "sources": []
             }
 
-        # Build context with chunked approach
         context = await build_chat_context(search_results["results"])
-
-        # Generate response
         response = generate_coherent_response(cleaned_query, context)
 
-        # Update chat history
         chat_id = chat_id or str(uuid.uuid4())
         if chat_id not in state_manager.chat_sessions:
             state_manager.chat_sessions[chat_id] = {
@@ -1030,7 +1107,7 @@ async def chat_with_documents(
 
         state_manager.chat_sessions[chat_id]["messages"].append({
             "role": "user",
-            "content": query,  # Store original query for history
+            "content": query,
             "timestamp": datetime.datetime.now().isoformat()
         })
         state_manager.chat_sessions[chat_id]["messages"].append({
@@ -1129,7 +1206,10 @@ async def preview_file(file_id: str, user_id: str, api_key: str = Depends(valida
         ".md": "text/markdown",
         ".rtf": "application/rtf"
     }
-    return StreamingResponse(BytesIO(base64.b64decode(file_meta['content'])), media_type=mime_map.get(file_meta['file_type'], "application/octet-stream"))
+    return StreamingResponse(
+        BytesIO(base64.b64decode(file_meta['content'])),
+        media_type=mime_map.get(file_meta['file_type'], "application/octet-stream")
+    )
 
 @app.get("/knowledge_graph", response_model=Dict[str, Any])
 async def get_knowledge_graph(
@@ -1143,63 +1223,105 @@ async def get_knowledge_graph(
         edges = []
         file_map = {f['file_id']: f['filename'] for f in state_manager.file_metadata}
 
-        # Filter nodes and edges by user_id and optionally file_id
-        for node, data in knowledge_graph.graph.nodes(data=True):
-            node_type = data.get('type', 'entity')
-            if node_type == 'entity' and (not file_id or any(
-                edge[1] == file_id for edge in knowledge_graph.graph.edges(node)
-            )):
-                nodes.append({
-                    "id": node,
-                    "label": node,
-                    "type": node_type
-                })
+        txn = knowledge_graph.client.txn(read_only=True)
+        try:
+            # Query for entities and documents
+            query = """
+                query {
+                    entities(func: eq(type, "entity")) {
+                        uid
+                        name
+                        type
+                        appears_in {
+                            uid
+                            document_id
+                        }
+                        relationship {
+                            uid
+                            name
+                            type
+                            predicate
+                            weight
+                        }
+                    }
+                    documents(func: has(document_id)) {
+                        uid
+                        document_id
+                    }
+                }
+            """
+            if file_id:
+                query = f"""
+                    query {{
+                        entities(func: eq(type, "entity")) @filter(has(appears_in)) {{
+                            uid
+                            name
+                            type
+                            appears_in @filter(eq(document_id, "{file_id}")) {{
+                                uid
+                                document_id
+                            }}
+                            relationship {{
+                                uid
+                                name
+                                type
+                                predicate
+                                weight
+                            }}
+                        }}
+                        documents(func: eq(document_id, "{file_id}")) {{
+                            uid
+                            document_id
+                        }}
+                    }}
+                """
+            res = txn.query(query)
+            data = json.loads(res.json)
 
-        # Include document nodes if they match file_id or user_id
-        if file_id:
-            if file_id in file_map:
+            # Process entities
+            for entity in data.get("entities", []):
                 nodes.append({
-                    "id": file_id,
-                    "label": file_map[file_id],
+                    "id": entity["uid"],
+                    "label": entity["name"],
                     "type": "entity"
                 })
-        else:
-            for file in state_manager.file_metadata:
-                if file['user_id'] == user_id:
-                    nodes.append({
-                        "id": file['file_id'],
-                        "label": file['filename'],
-                        "type": "entity"
-                    })
+                for rel in entity.get("relationship", []):
+                    if rel.get("name"):
+                        nodes.append({
+                            "id": rel["uid"],
+                            "label": rel["name"],
+                            "type": rel.get("type", "entity")
+                        })
+                        edges.append({
+                            "from": entity["uid"],
+                            "to": rel["uid"],
+                            "label": rel["predicate"],
+                            "weight": rel.get("weight", 1.0)
+                        })
+                for doc in entity.get("appears_in", []):
+                    if doc.get("document_id"):
+                        edges.append({
+                            "from": entity["uid"],
+                            "to": doc["uid"],
+                            "label": "appears_in",
+                            "weight": 1.0
+                        })
 
-        # Collect edges
-        for source, target, data in knowledge_graph.graph.edges(data=True):
-            if file_id and target != file_id and source != file_id:
-                continue
-            if any(f['file_id'] == target and f['user_id'] == user_id for f in state_manager.file_metadata) or \
-               any(f['file_id'] == source and f['user_id'] == user_id for f in state_manager.file_metadata):
-                edges.append({
-                    "from": source,
-                    "to": target,
-                    "label": data.get("relationship", "related_to"),
-                    "weight": data.get("weight", 1.0)
+            # Process documents
+            for doc in data.get("documents", []):
+                nodes.append({
+                    "id": doc["uid"],
+                    "label": file_map.get(doc["document_id"], doc["document_id"]),
+                    "type": "document"
                 })
 
-        logger.info(f"Retrieved knowledge graph for user_id={user_id}, file_id={file_id}")
-        return {
-            "status": "success",
-            "nodes": nodes,
-            "edges": edges
-        }
+            return {
+                "status": "success",
+                "nodes": nodes,
+                "edges": edges
+            }
+        finally:
+            txn.discard()
     except Exception as e:
         logger.error(f"Failed to retrieve knowledge graph: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy"}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -12,8 +12,12 @@ services:
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - DGRAPH_TOKEN=${DGRAPH_TOKEN}
     depends_on:
-      - qdrant
+      dgraph:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
   streamlit-service:
     build: .
     command: streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0
@@ -26,13 +30,31 @@ services:
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - DGRAPH_TOKEN=${DGRAPH_TOKEN}
     depends_on:
-      - rag-service
+      rag-service:
+        condition: service_started
+      dgraph:
+        condition: service_healthy
   qdrant:
     image: qdrant/qdrant:latest
     ports:
       - "6333:6333"
     volumes:
       - pdfllm_qdrant-data:/qdrant/storage
+  dgraph:
+    image: dgraph/standalone:latest
+    ports:
+      - "8030:8080"
+      - "9080:9080"
+    volumes:
+      - pdfllm_dgraph-data:/dgraph
+    healthcheck:
+      test: ["CMD", "curl", "-s", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 volumes:
   pdfllm_qdrant-data:
+  pdfllm_dgraph-data:

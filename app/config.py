@@ -34,8 +34,12 @@ class Settings(BaseSettings):
     qdrant_port: int = 6333
     qdrant_collection: str = "documents"
 
+    # Dgraph settings
+    dgraph_host: str = "dgraph"
+    dgraph_port: int = 9080
+    dgraph_token: str = Field("", env="DGRAPH_TOKEN")
+
     # Knowledge Graph settings
-    graph_file: str = "./data/knowledge_graph.json"
     max_graph_depth: int = 3
 
     # Settings config
@@ -45,5 +49,4 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
-# Singleton instance
 settings = Settings()

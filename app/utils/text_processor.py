@@ -28,6 +28,7 @@ class TextProcessor:
 
     def clean_markdown(self, text: str) -> str:
         """Clean markdown text by removing excessive whitespace and special characters"""
+        text = re.sub(r'[\n\r\t]', ' ', text)  # Replace newlines, tabs with spaces
         text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces with single space
         text = re.sub(r'#+', '#', text)   # Normalize headers
         text = re.sub(r'(\w)\s+(\w)', r'\1\2', text)  # Fix spaced characters
@@ -176,11 +177,21 @@ class TextProcessor:
         return "N/A"
 
     async def extract_entities(self, text: str) -> List[str]:
+        """Extract and sanitize entities from text, removing newlines and metadata like 'Date'"""
         try:
             doc = self.nlp(text)
-            entities = [ent.text for ent in doc.ents if ent.label_ in ["PERSON", "ORG", "GPE", "NORP", "PRODUCT", "EVENT"]]
+            entities = []
+            for ent in doc.ents:
+                if ent.label_ in ["PERSON", "ORG", "GPE", "NORP", "PRODUCT", "EVENT"]:
+                    cleaned_entity = re.sub(r'[\n\r\t]', ' ', ent.text).strip()
+                    cleaned_entity = re.sub(r'\s+', ' ', cleaned_entity)
+                    # Skip entities containing metadata keywords or invalid characters
+                    if (cleaned_entity and len(cleaned_entity) <= 255 and 
+                        not re.search(r'\b(Date|Signature)\b', cleaned_entity, re.IGNORECASE)):
+                        entities.append(cleaned_entity)
+            entities = list(set(entities))
             logger.debug(f"Extracted entities: {entities}")
-            return list(set(entities))
+            return entities
         except Exception as e:
             logger.error(f"Entity extraction failed: {str(e)}")
             return []
@@ -191,10 +202,12 @@ class TextProcessor:
         reraise=True
     )
     async def extract_relationships(self, chunk: Dict) -> List[Dict]:
+        """Extract relationships from chunk, ensuring subjects and objects are sanitized"""
         prompt = (
             "Extract precise relationships (e.g., 'person works at organization', 'entity is located in place', 'organization owns product') "
             "from the following text. Return a JSON object with a 'relationships' key containing a list of "
             "{subject, predicate, object} dictionaries. Ensure the response is valid JSON and relationships are specific and meaningful. "
+            "Sanitize subjects and objects by removing newlines, tabs, and excessive spaces, and exclude entities containing 'Date' or 'Signature'. "
             "If no relationships are found, return an empty list under 'relationships'. "
             "Do not include markdown code blocks or extra text.\n\n"
             f"Text: {chunk['content']}\n\n"
@@ -211,6 +224,8 @@ class TextProcessor:
                         "content": (
                             "You are an expert in relationship extraction. Return valid JSON with a 'relationships' key "
                             "containing a list of dictionaries with 'subject', 'predicate', and 'object' keys. "
+                            "Sanitize subjects and objects by removing newlines, tabs, and excessive spaces. "
+                            "Exclude relationships where subject or object contains 'Date' or 'Signature'. "
                             "If no relationships are found, return {\"relationships\": []}. "
                             "Do not include markdown code blocks or extra text."
                         )
@@ -242,11 +257,21 @@ class TextProcessor:
                 valid_relationships = []
                 for rel in result['relationships']:
                     if isinstance(rel, dict) and all(key in rel for key in ['subject', 'predicate', 'object']):
-                        valid_relationships.append({
-                            'subject': rel['subject'],
-                            'predicate': rel['predicate'],
-                            'object': rel['object']
-                        })
+                        # Sanitize subject and object
+                        subject = re.sub(r'[\n\r\t]', ' ', rel['subject']).strip()
+                        subject = re.sub(r'\s+', ' ', subject)
+                        object_ = re.sub(r'[\n\r\t]', ' ', rel['object']).strip()
+                        object_ = re.sub(r'\s+', ' ', object_)
+                        if (subject and object_ and len(subject) <= 255 and len(object_) <= 255 and
+                            not re.search(r'\b(Date|Signature)\b', subject, re.IGNORECASE) and
+                            not re.search(r'\b(Date|Signature)\b', object_, re.IGNORECASE)):
+                            valid_relationships.append({
+                                'subject': subject,
+                                'predicate': rel['predicate'],
+                                'object': object_
+                            })
+                        else:
+                            logger.warning(f"Invalid relationship in chunk {chunk['chunk_index']}: {rel}")
                     else:
                         logger.warning(f"Invalid relationship format in chunk {chunk['chunk_index']}: {rel}")
 
@@ -266,6 +291,7 @@ class TextProcessor:
         reraise=True
     )
     async def generate_embeddings(self, text: str) -> List[Tuple[str, List[float]]]:
+        """Generate embeddings for text chunks, including entity and relationship extraction"""
         chunks = self.chunk_text(text)
         embeddings = []
 
@@ -276,9 +302,9 @@ class TextProcessor:
                     model=settings.embedding_model
                 )
                 embedding = response.data[0].embedding
-                embeddings.append((chunk['content'], embedding))
                 chunk['entities'] = await self.extract_entities(chunk['content'])
                 chunk['relationships'] = await self.extract_relationships(chunk)
+                embeddings.append((chunk['content'], embedding))
                 logger.info(f"Generated embedding for chunk {chunk['chunk_index']} with {len(self.tokenizer.encode(chunk['content']))} tokens")
             except Exception as e:
                 logger.error(f"Embedding generation failed for chunk {chunk['chunk_index']}: {str(e)}")
