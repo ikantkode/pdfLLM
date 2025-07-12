@@ -10,7 +10,7 @@ The system combines:
 - 💬 **LLM-Powered Answers**: Uses OpenAI chat models to generate accurate, cited responses.
 - 📊 **Hybrid Retrieval**: Combines vector similarity and entity relationships for precision.
 
-Documents are parsed, cleaned (OCR-aware), chunked, embedded, and indexed both in Qdrant and a dgraph.
+Documents are parsed, cleaned (OCR-aware), chunked, embedded, and indexed both in Qdrant and dgraph.
 
 ## Features
 
