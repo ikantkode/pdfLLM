@@ -1,6 +1,6 @@
 # Core dependencies
 fastapi==0.115.0
-uvicorn==0.30.0
+uvicorn==0.30.6
 streamlit==1.39.0
 
 # Document processing
@@ -33,9 +33,8 @@ httpx==0.27.0
 python-dotenv==1.0.1
 pydantic-settings==2.5.2
 
-# Runtime dependencies
-python-dateutil==2.9.0.post0
-typing-extensions==4.11.0
-
 # Graph Visualization
 pyvis==0.3.2
+
+# Mistral + OCR
+mistralai==1.2.0

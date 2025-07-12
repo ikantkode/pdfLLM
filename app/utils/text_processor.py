@@ -1,9 +1,10 @@
 import re
 import json
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import spacy
-import openai
+from openai import OpenAI
+import tiktoken
 from config import settings
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -17,67 +18,70 @@ class TextProcessor:
         except Exception as e:
             logger.error(f"Failed to load Spacy model: {str(e)}")
             raise
+        
+        if not settings.openai_api_key:
+            raise ValueError("openai_api_key is not configured in settings")
+            
+        self.client = OpenAI(api_key=settings.openai_api_key)
+        self.tokenizer = tiktoken.encoding_for_model(settings.embedding_model)
+        self.max_tokens = 8000  # Slightly below 8192 to be safe
 
     def clean_markdown(self, text: str) -> str:
         """Clean markdown text by removing excessive whitespace and special characters"""
         text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces with single space
         text = re.sub(r'#+', '#', text)   # Normalize headers
-        text = re.sub(r'(\w)\s+(\w)', r'\1\2', text)  # Fix spaced characters (e.g., "D z i u b a" → "Dziuba")
-        text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)  # Fix spaced numbers (e.g., "1 , 510 . 88" → "1,510.88")
+        text = re.sub(r'(\w)\s+(\w)', r'\1\2', text)  # Fix spaced characters
+        text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)  # Fix spaced numbers
         text = text.strip()
         return text
 
     def chunk_text(self, text: str, max_tokens: int = settings.max_embedding_tokens) -> List[Dict]:
-        """Split text into chunks, preserving table structures"""
-        # Detect markdown tables
+        """Split text into chunks, preserving table structures, using tiktoken for accurate token counting"""
         table_pattern = r'(\|.*?\|\n(?:\|[-: ]+\|\n)+.*?)(?=\n\n|\Z)'
         tables = re.findall(table_pattern, text, re.DOTALL)
         non_table_text = re.sub(table_pattern, 'TABLE_PLACEHOLDER', text)
 
         chunks = []
-        current_chunk = ""
-        token_count = 0
+        current_chunk = []
+        current_token_count = 0
         chunk_index = 0
         placeholder_count = 0
 
-        # Split non-table text by sentences
         doc = self.nlp(non_table_text)
         for sent in doc.sents:
             sent_text = sent.text
             if 'TABLE_PLACEHOLDER' in sent_text:
-                # Replace placeholder with actual table
                 if placeholder_count < len(tables):
                     table_text = tables[placeholder_count]
-                    table_tokens = len(self.nlp.tokenizer(table_text))
+                    table_tokens = len(self.tokenizer.encode(table_text))
                     if table_tokens > max_tokens:
-                        # Split table into rows
                         rows = table_text.split('\n')
-                        sub_chunk = ""
+                        sub_chunk = []
                         sub_tokens = 0
                         for row in rows:
-                            row_tokens = len(self.nlp.tokenizer(row))
+                            row_tokens = len(self.tokenizer.encode(row))
                             if sub_tokens + row_tokens > max_tokens:
                                 if sub_chunk:
                                     chunks.append({
-                                        "content": sub_chunk.strip(),
+                                        "content": "\n".join(sub_chunk).strip(),
                                         "chunk_index": chunk_index,
-                                        "parent_section": self._extract_section(sub_chunk),
+                                        "parent_section": self._extract_section("\n".join(sub_chunk)),
                                         "entities": [],
                                         "relationships": []
                                     })
                                     chunk_index += 1
-                                    sub_chunk = ""
+                                    sub_chunk = []
                                     sub_tokens = 0
-                                sub_chunk += row + "\n"
+                                sub_chunk.append(row)
                                 sub_tokens += row_tokens
                             else:
-                                sub_chunk += row + "\n"
+                                sub_chunk.append(row)
                                 sub_tokens += row_tokens
                         if sub_chunk:
                             chunks.append({
-                                "content": sub_chunk.strip(),
+                                "content": "\n".join(sub_chunk).strip(),
                                 "chunk_index": chunk_index,
-                                "parent_section": self._extract_section(sub_chunk),
+                                "parent_section": self._extract_section("\n".join(sub_chunk)),
                                 "entities": [],
                                 "relationships": []
                             })
@@ -88,36 +92,36 @@ class TextProcessor:
                         sent_text = sent_text.replace('TABLE_PLACEHOLDER', table_text)
                         placeholder_count += 1
 
-            sent_tokens = len(self.nlp.tokenizer(sent_text))
-            if token_count + sent_tokens > max_tokens:
+            sent_tokens = len(self.tokenizer.encode(sent_text))
+            if current_token_count + sent_tokens > max_tokens:
                 if current_chunk:
                     chunks.append({
-                        "content": current_chunk.strip(),
+                        "content": "\n".join(current_chunk).strip(),
                         "chunk_index": chunk_index,
-                        "parent_section": self._extract_section(current_chunk),
+                        "parent_section": self._extract_section("\n".join(current_chunk)),
                         "entities": [],
                         "relationships": []
                     })
                     chunk_index += 1
-                    current_chunk = ""
-                    token_count = 0
+                    current_chunk = []
+                    current_token_count = 0
 
-            current_chunk += sent_text + "\n"
-            token_count += sent_tokens
+            current_chunk.append(sent_text)
+            current_token_count += sent_tokens
 
         if current_chunk:
             chunks.append({
-                "content": current_chunk.strip(),
+                "content": "\n".join(current_chunk).strip(),
                 "chunk_index": chunk_index,
-                "parent_section": self._extract_section(current_chunk),
+                "parent_section": self._extract_section("\n".join(current_chunk)),
                 "entities": [],
                 "relationships": []
             })
+            chunk_index += 1
 
-        # Add remaining tables
         while placeholder_count < len(tables):
             table_text = tables[placeholder_count]
-            table_tokens = len(self.nlp.tokenizer(table_text))
+            table_tokens = len(self.tokenizer.encode(table_text))
             if table_tokens <= max_tokens:
                 chunks.append({
                     "content": table_text.strip(),
@@ -128,45 +132,43 @@ class TextProcessor:
                 })
                 chunk_index += 1
             else:
-                # Split table into rows
                 rows = table_text.split('\n')
-                sub_chunk = ""
+                sub_chunk = []
                 sub_tokens = 0
                 for row in rows:
-                    row_tokens = len(self.nlp.tokenizer(row))
+                    row_tokens = len(self.tokenizer.encode(row))
                     if sub_tokens + row_tokens > max_tokens:
                         if sub_chunk:
                             chunks.append({
-                                "content": sub_chunk.strip(),
+                                "content": "\n".join(sub_chunk).strip(),
                                 "chunk_index": chunk_index,
-                                "parent_section": self._extract_section(sub_chunk),
+                                "parent_section": self._extract_section("\n".join(sub_chunk)),
                                 "entities": [],
                                 "relationships": []
                             })
                             chunk_index += 1
-                            sub_chunk = ""
+                            sub_chunk = []
                             sub_tokens = 0
-                        sub_chunk += row + "\n"
+                        sub_chunk.append(row)
                         sub_tokens += row_tokens
                     else:
-                        sub_chunk += row + "\n"
+                        sub_chunk.append(row)
                         sub_tokens += row_tokens
                 if sub_chunk:
                     chunks.append({
-                        "content": sub_chunk.strip(),
+                        "content": "\n".join(sub_chunk).strip(),
                         "chunk_index": chunk_index,
-                        "parent_section": self._extract_section(sub_chunk),
+                        "parent_section": self._extract_section("\n".join(sub_chunk)),
                         "entities": [],
                         "relationships": []
                     })
                     chunk_index += 1
             placeholder_count += 1
 
-        logger.debug(f"Chunked text into {len(chunks)} chunks")
+        logger.info(f"Chunked text into {len(chunks)} chunks with max {max_tokens} tokens")
         return chunks
 
     def _extract_section(self, text: str) -> str:
-        """Extract section identifier from text"""
         lines = text.split('\n')
         for line in lines:
             if line.startswith('#'):
@@ -174,12 +176,11 @@ class TextProcessor:
         return "N/A"
 
     async def extract_entities(self, text: str) -> List[str]:
-        """Extract entities using Spacy"""
         try:
             doc = self.nlp(text)
             entities = [ent.text for ent in doc.ents if ent.label_ in ["PERSON", "ORG", "GPE", "NORP", "PRODUCT", "EVENT"]]
             logger.debug(f"Extracted entities: {entities}")
-            return list(set(entities))  # Remove duplicates
+            return list(set(entities))
         except Exception as e:
             logger.error(f"Entity extraction failed: {str(e)}")
             return []
@@ -190,7 +191,6 @@ class TextProcessor:
         reraise=True
     )
     async def extract_relationships(self, chunk: Dict) -> List[Dict]:
-        """Extract relationships using OpenAI API"""
         prompt = (
             "Extract precise relationships (e.g., 'person works at organization', 'entity is located in place', 'organization owns product') "
             "from the following text. Return a JSON object with a 'relationships' key containing a list of "
@@ -203,7 +203,7 @@ class TextProcessor:
         )
 
         try:
-            response = openai.chat.completions.create(
+            response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {
@@ -265,19 +265,22 @@ class TextProcessor:
         wait=wait_exponential(multiplier=1, min=4, max=10),
         reraise=True
     )
-    async def generate_embeddings(self, chunks: List[Dict]) -> List[Dict]:
-        """Generate embeddings for chunks and extract entities/relationships"""
-        texts = [chunk['content'] for chunk in chunks]
-        try:
-            response = openai.embeddings.create(
-                model=settings.embedding_model,
-                input=texts
-            )
-            for i, chunk in enumerate(chunks):
-                chunk['embedding'] = response.data[i].embedding
+    async def generate_embeddings(self, text: str) -> List[Tuple[str, List[float]]]:
+        chunks = self.chunk_text(text)
+        embeddings = []
+
+        for chunk in chunks:
+            try:
+                response = self.client.embeddings.create(
+                    input=chunk['content'],
+                    model=settings.embedding_model
+                )
+                embedding = response.data[0].embedding
+                embeddings.append((chunk['content'], embedding))
                 chunk['entities'] = await self.extract_entities(chunk['content'])
                 chunk['relationships'] = await self.extract_relationships(chunk)
-            return chunks
-        except Exception as e:
-            logger.error(f"Embedding generation failed: {str(e)}")
-            raise
+                logger.info(f"Generated embedding for chunk {chunk['chunk_index']} with {len(self.tokenizer.encode(chunk['content']))} tokens")
+            except Exception as e:
+                logger.error(f"Embedding generation failed for chunk {chunk['chunk_index']}: {str(e)}")
+                raise
+        return embeddings

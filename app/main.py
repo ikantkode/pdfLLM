@@ -9,7 +9,6 @@ import re
 from typing import List, Dict, Optional, Any
 from io import BytesIO
 from pathlib import Path
-
 from fastapi import (
     FastAPI,
     UploadFile,
@@ -27,16 +26,16 @@ from fastapi.encoders import jsonable_encoder
 import tiktoken
 import networkx as nx
 from tenacity import retry, stop_after_attempt, wait_exponential
-import openai
+from openai import OpenAI
 from pydantic import BaseModel
 from config import settings
 from utils.qdrant_handler import QdrantHandler
 from utils.text_processor import TextProcessor
+from utils.ocr_processor import OCRProcessor
 from converters import (
     image_converter,
     doc_converter,
     excel_converter,
-    pdf_converter,
     txt_converter
 )
 
@@ -84,16 +83,32 @@ async def validate_api_key(api_key: str = Depends(api_key_header)):
         )
     return api_key
 
-# Initialize components
+# Initialize OCR processor
+ocr_processor = OCRProcessor()
+
+# Initialize Qdrant with retry logic
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=4, max=20),
+    reraise=True
+)
+def initialize_qdrant_handler():
+    try:
+        qdrant_handler = QdrantHandler(
+            host=settings.qdrant_host,
+            port=settings.qdrant_port,
+            collection_name=settings.qdrant_collection
+        )
+        logger.info("Qdrant connection established")
+        return qdrant_handler
+    except Exception as e:
+        logger.error(f"Qdrant connection attempt failed: {str(e)}")
+        raise
+
 try:
-    qdrant_handler = QdrantHandler(
-        host=settings.qdrant_host,
-        port=settings.qdrant_port,
-        collection_name=settings.qdrant_collection
-    )
-    logger.info("Qdrant connection established")
+    qdrant_handler = initialize_qdrant_handler()
 except Exception as e:
-    logger.error(f"Qdrant connection failed: {str(e)}")
+    logger.error(f"Qdrant connection failed after retries: {str(e)}")
     raise
 
 try:
@@ -251,8 +266,6 @@ def get_file_converter(file_ext: str):
         return doc_converter.convert_to_markdown
     elif file_ext in settings.supported_extensions['spreadsheets']:
         return excel_converter.convert_to_markdown
-    elif file_ext in settings.supported_extensions['pdfs']:
-        return pdf_converter.convert_to_markdown
     elif file_ext in settings.supported_extensions['text']:
         return txt_converter.convert_to_markdown
     return None
@@ -314,13 +327,16 @@ def split_large_text(text: str, max_tokens: int = settings.max_embedding_tokens)
                         chunks.append(sub_chunk.strip())
                         sub_chunk = ""
                         sub_tokens = 0
-                sub_chunk += row + "\n"
-                sub_tokens += row_tokens
+                    sub_chunk += row + "\n"
+                    sub_tokens += row_tokens
+                else:
+                    sub_chunk += row + "\n"
+                    sub_tokens += row_tokens
             if sub_chunk:
                 chunks.append(sub_chunk.strip())
         placeholder_count += 1
 
-    logger.debug(f"Split text into {len(chunks)} chunks")
+    logger.info(f"Split text into {len(chunks)} chunks with max {max_tokens} tokens")
     return chunks
 
 @retry(
@@ -331,7 +347,8 @@ def split_large_text(text: str, max_tokens: int = settings.max_embedding_tokens)
 def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
     """Generate embeddings with batch processing and retry logic"""
     try:
-        response = openai.embeddings.create(
+        client = OpenAI(api_key=settings.openai_api_key)
+        response = client.embeddings.create(
             model=settings.embedding_model,
             input=texts
         )
@@ -351,38 +368,56 @@ async def preprocess_ocr_text(text: str) -> str:
     chunks = split_large_text(text, max_tokens=settings.max_embedding_tokens // 2)
     cleaned_chunks = []
 
+    client = OpenAI(api_key=settings.openai_api_key)
     for chunk in chunks:
         try:
             prompt = (
-                f"Input Text:\n{chunk}\n\n"
-                "The input text may contain OCR errors such as spaces between characters (e.g., 'D z i u b a' or '5 0 . 4 3'), repeated words, malformed numbers (e.g., '1 , 98 . 16' or '7,068.92Net5,079.50'), or misaligned formatting. "
-                "Your task is to:\n"
-                "1. Reconstruct the text into clear, coherent sentences with proper grammar and formatting.\n"
-                "2. Remove spaces between individual characters in words, names, or numbers (e.g., 'D z i u b a' → 'Dziuba', '5 0 . 4 3' → '50.43').\n"
-                "3. Correct numerical values, ensuring single '$' for currency (e.g., '$$50.43' → '$50.43', '1 , 98 . 16' → '$1,988.16', '7,068.92Net5,079.50' → 'Gross $7,068.92, Net $5,079.50', '5 . 05perhour' → '$5.05 per hour').\n"
-                "4. Fix fragmented or misspelled names (e.g., 'E r m i l o L o p e z' → 'Ermilo Lopez').\n"
-                "5. Preserve markdown structure, especially tables, and ensure they are formatted correctly (e.g., align columns, fix headers).\n"
-                "6. For payroll-related text, identify and format key details (e.g., Employee, Role, Hours, Rate, Gross Pay, Net Pay) in a markdown table.\n"
-                "7. Validate numerical consistency: ensure Gross Pay = Hours × Rate, and Net Pay < Gross Pay. Use context-provided rates (e.g., $94.43 per hour) if available.\n"
-                "8. Remove redundant or gibberish text, but retain all meaningful information.\n"
-                "9. If the text is ambiguous, make reasonable assumptions based on context and note them in comments (e.g., '<!-- Assumed currency as USD -->').\n"
-                "10. Return the cleaned text in markdown format, preserving structural elements like headings and tables.\n\n"
-                "Example Input:\n"
-                "Z e n o v i i D z i u b a L a b o r e r 1 6 h o u r s 9 4 . 4 3 p e r h o u r 1 , 5 1 0 . 8 8 N e t 1 , 1 4 3 . 2 0\n"
-                "E r m i l o L o p e z L a b o r e r 8 h o u r s 9 4 . 4 3 p e r h o u r 7 5 5 . 4 4 N e t 6 0 8 . 6 5\n\n"
-                "Example Output:\n"
-                "```markdown\n"
-                "## Payroll Details\n"
-                "| Employee | Role | Hours | Rate | Gross Pay | Net Pay |\n"
-                "|----------|------|-------|------|-----------|---------|\n"
-                "| Zenovii Dziuba | Laborer | 16 | $94.43 per hour | $1,510.88 | $1,143.20 |\n"
-                "| Ermilo Lopez | Laborer | 8 | $94.43 per hour | $755.44 | $608.65 |\n"
-                "<!-- Assumed currency as USD based on context -->\n"
-                "```\n"
-                "Return the cleaned text in markdown format."
+                        f"Input Text:\n{chunk}\n\n"
+            "You are an intelligent document cleaner. The input text may contain OCR errors such as:\n"
+            "- Extra spaces between characters (e.g., 'D z i u b a', '5 0 . 4 3')\n"
+            "- Malformed numbers (e.g., '1 , 98 . 16', '$$50.43', '7,068.92Net5,079.50')\n"
+            "- Repeated words, misaligned formatting, or broken names (e.g., 'E r m i l o L o p e z')\n"
+            "- Incomplete, gibberish, or disorganized text\n\n"
+
+            "Your tasks are:\n"
+            "1. **Reconstruct** the text into clear, grammatically correct, and logically structured content.\n"
+            "2. **Fix character spacing** in names, words, and numbers.\n"
+            "3. **Standardize numbers and currency** formatting (e.g., '1 , 98 . 16' → '$1,988.16'). Use a single `$` where needed.\n"
+            "4. **Rejoin broken names or words** (e.g., 'E r m i l o L o p e z' → 'Ermilo Lopez').\n"
+            "5. **Preserve markdown** formatting such as headings, lists, and tables. Ensure tables are well-aligned.\n"
+            "6. **If the input contains payroll-related information** (such as employee names, hours, pay rates, gross/net pay):\n"
+            "   - Extract the relevant data and structure it in a markdown table.\n"
+            "   - Columns should include: `Employee`, `Role`, `Hours`, `Rate`, `Gross Pay`, `Net Pay`.\n"
+            "   - Ensure Gross Pay = Hours × Rate, and Net Pay < Gross Pay. Make reasonable assumptions and note them if necessary.\n"
+            "7. **If the input is not payroll-related**, simply clean and format the content into readable markdown, preserving any headings, paragraphs, or lists.\n"
+            "8. **Remove noise or gibberish**, but preserve all meaningful data.\n"
+            "9. **Comment assumptions** using HTML comments (e.g., `<!-- Assumed currency as USD -->`).\n"
+            "10. **Return only the cleaned text in markdown format**.\n\n"
+
+            "Example Input (Payroll):\n"
+            "Z e n o v i i D z i u b a L a b o r e r 1 6 h o u r s 9 4 . 4 3 p e r h o u r 1 , 5 1 0 . 8 8 N e t 1 , 1 4 3 . 2 0\n"
+            "E r m i l o L o p e z L a b o r e r 8 h o u r s 9 4 . 4 3 p e r h o u r 7 5 5 . 4 4 N e t 6 0 8 . 6 5\n\n"
+            
+            "Example Output (Payroll):\n"
+            "```markdown\n"
+            "## Payroll Details\n"
+            "| Employee        | Role     | Hours | Rate             | Gross Pay | Net Pay  |\n"
+            "|-----------------|----------|-------|------------------|-----------|----------|\n"
+            "| Zenovii Dziuba  | Laborer  | 16    | $94.43 per hour  | $1,510.88 | $1,143.20|\n"
+            "| Ermilo Lopez    | Laborer  | 8     | $94.43 per hour  | $755.44   | $608.65  |\n"
+            "<!-- Assumed currency as USD -->\n"
+            "```\n\n"
+
+            "Example Input (Non-payroll):\n"
+            "T h e   p r o j e c t   w a s   i n i t i a t e d   o n   0 5 . 0 6 . 2 0 2 3   a n d   i n v o l v e d   r e g u l a r   s a f e t y   i n s p e c t i o n s .\n"
+
+            "Example Output (Non-payroll):\n"
+            "```markdown\n"
+            "The project was initiated on 05.06.2023 and involved regular safety inspections.\n"
+            "```\n"
             )
 
-            response = openai.chat.completions.create(
+            response = client.chat.completions.create(
                 model=settings.chat_model,
                 messages=[
                     {
@@ -477,7 +512,7 @@ def clean_response(text: str) -> str:
                             net, gross = gross, net
                         total_gross += gross
                         net_pay_values.append(net)
-                        total_net = sum(net_pay_values)  # Use table values for total_net
+                        total_net = sum(net_pay_values)
                     except (ValueError, AttributeError) as e:
                         logger.warning(f"Failed to validate table row: {cells}, error: {str(e)}")
                     cleaned_table.append('|'.join(cells))
@@ -516,7 +551,7 @@ def clean_response(text: str) -> str:
                         net, gross = gross, net
                     total_gross += gross
                     net_pay_values.append(net)
-                    total_net = sum(net_pay_values)  # Use table values for total_net
+                    total_net = sum(net_pay_values)
                 except (ValueError, AttributeError) as e:
                     logger.warning(f"Failed to validate table row: {cells}, error: {str(e)}")
             cleaned_table.append('|'.join(cells))
@@ -660,6 +695,7 @@ async def build_chat_context(results: List[SearchResult]) -> str:
 )
 def generate_coherent_response(query: str, context: str) -> str:
     """Generate response with proper token management and assistant-like behavior"""
+    client = OpenAI(api_key=settings.openai_api_key)
     prompt = (
         f"Context:\n{context}\n\n"
         f"Query: {query}\n\n"
@@ -693,7 +729,7 @@ def generate_coherent_response(query: str, context: str) -> str:
     )
 
     try:
-        response = openai.chat.completions.create(
+        response = client.chat.completions.create(
             model=settings.chat_model,
             messages=[
                 {
@@ -778,14 +814,18 @@ async def process_file(
         file_content = await file.read()
         temp_path.write_bytes(file_content)
 
-        converter = get_file_converter(file_ext)
-        if not converter:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file format: {file_ext}"
-            )
-
-        markdown_content = converter(str(temp_path))
+        # Use OCR for PDFs, existing converters for other formats
+        if file_ext in settings.supported_extensions['pdfs']:
+            logger.info(f"Processing PDF {file.filename} with OCR")
+            markdown_content = ocr_processor.process_pdf(str(temp_path))
+        else:
+            converter = get_file_converter(file_ext)
+            if not converter:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported file format: {file_ext}"
+                )
+            markdown_content = converter(str(temp_path))
 
         # Preprocess OCR text for images and PDFs
         is_ocr_likely = file_ext in settings.supported_extensions['images'] or file_ext in settings.supported_extensions['pdfs']
@@ -794,38 +834,50 @@ async def process_file(
         else:
             cleaned_markdown = text_processor.clean_markdown(markdown_content)
 
-        # Process content with enhanced chunking
-        chunks = text_processor.chunk_text(cleaned_markdown)
+        # Generate embeddings for chunks
+        chunk_embeddings = await text_processor.generate_embeddings(cleaned_markdown)
+        if not chunk_embeddings:
+            raise ValueError("No embeddings generated for the document")
 
-        # Process in batches for large documents
-        batch_size = 50
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i:i + batch_size]
+        # Store each chunk in Qdrant
+        for i, (chunk_text, embedding) in enumerate(chunk_embeddings):
+            # Generate a valid UUID for the chunk
+            chunk_id = str(uuid.uuid5(uuid.UUID(file_id), f"chunk_{i}"))
+            
+            # Extract entities and relationships for this chunk
+            entities = await text_processor.extract_entities(chunk_text)
+            relationships = await text_processor.extract_relationships({"content": chunk_text, "chunk_index": i})
 
-            # Generate embeddings and extract knowledge
-            batch = await text_processor.generate_embeddings(batch)
+            # Store in Qdrant
+            qdrant_handler.store_chunk(
+                document_id=file_id,
+                chunk_id=chunk_id,
+                chunk_text=chunk_text,
+                embedding=embedding,
+                metadata={
+                    "filename": file.filename,
+                    "user_id": user_id,
+                    "chunk_index": i,
+                    "parent_section": text_processor._extract_section(chunk_text),
+                    "entities": entities,
+                    "relationships": relationships
+                }
+            )
 
-            for chunk in batch:
-                chunk['document_id'] = file_id
-                chunk['user_id'] = user_id
+            # Index entities and relationships in knowledge graph
+            for entity in entities:
+                knowledge_graph.add_relationship(
+                    source=entity,
+                    target=file_id,
+                    relationship="appears_in"
+                )
 
-                # Add to vector store
-                await qdrant_handler.save_chunk(chunk, user_id)
-
-                # Index entities and relationships in knowledge graph
-                for entity in chunk.get('entities', []):
-                    knowledge_graph.add_relationship(
-                        source=entity,
-                        target=file_id,
-                        relationship="appears_in"
-                    )
-
-                for rel in chunk.get('relationships', []):
-                    knowledge_graph.add_relationship(
-                        source=rel['subject'],
-                        target=rel['object'],
-                        relationship=rel['predicate']
-                    )
+            for rel in relationships:
+                knowledge_graph.add_relationship(
+                    source=rel['subject'],
+                    target=rel['object'],
+                    relationship=rel['predicate']
+                )
 
         # Store metadata
         state_manager.file_metadata.append({
@@ -837,11 +889,12 @@ async def process_file(
             "markdown_content": cleaned_markdown,
             "user_id": user_id,
             "size": file.size,
-            "checksum": hashlib.md5(file_content).hexdigest()
+            "checksum": hashlib.md5(file_content).hexdigest(),
+            "chunks": len(chunk_embeddings)
         })
 
         state_manager.save()
-        logger.info(f"Processed file: {file.filename} (ID: {file_id})")
+        logger.info(f"Processed file: {file.filename} (ID: {file_id}) with {len(chunk_embeddings)} chunks")
         return {
             "status": "success",
             "file_id": file_id,

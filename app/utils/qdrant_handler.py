@@ -44,6 +44,52 @@ class QdrantHandler:
             logger.error(f"Failed to initialize collection: {str(e)}")
             raise
 
+    def store_chunk(
+        self,
+        document_id: str,
+        chunk_id: str,
+        chunk_text: str,
+        embedding: List[float],
+        metadata: Dict
+    ):
+        """Store a document chunk in Qdrant"""
+        try:
+            # Convert chunk_id to valid UUID format
+            if "_" in chunk_id:
+                # If using fileid_chunkindex format, convert to UUID
+                base_uuid = chunk_id.split("_")[0]
+                try:
+                    # Try to use the base UUID portion
+                    point_id = uuid.UUID(base_uuid)
+                except ValueError:
+                    # If not valid UUID, generate a new one from the string
+                    point_id = uuid.uuid5(uuid.NAMESPACE_DNS, chunk_id)
+            else:
+                # If already a UUID, use it directly
+                point_id = uuid.UUID(chunk_id)
+
+            payload = {
+                "document_id": document_id,
+                "content": chunk_text,
+                **metadata
+            }
+
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=[
+                    {
+                        "id": str(point_id),  # Ensure string representation of UUID
+                        "vector": embedding,
+                        "payload": payload
+                    }
+                ],
+                wait=True
+            )
+            logger.info(f"Stored chunk {chunk_id} for document {document_id}")
+        except Exception as e:
+            logger.error(f"Failed to store chunk {chunk_id}: {str(e)}")
+            raise
+
     async def save_chunk(self, chunk: Dict, user_id: str):
         """Save a chunk to Qdrant"""
         try:
