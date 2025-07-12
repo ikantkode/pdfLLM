@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 # Constants
 STATE_FILE = Path(settings.data_dir) / "streamlit_state.json"
+FASTAPI_HOST = "192.168.1.107"  # Replace with your local IP or hostname
+FASTAPI_PORT = "8000"  # FastAPI service port
 
 class SessionState:
     """Manage Streamlit session state with persistence"""
@@ -106,15 +108,19 @@ def delete_chat(chat_id: str):
     session_state.save()
     st.rerun()
 
-def get_file_preview_url(file_id: str) -> Optional[str]:
-    """Generate a URL for file preview using the /preview endpoint"""
+def get_file_preview_url(filename: str) -> Optional[str]:
+    """Generate a URL for file preview using the /preview endpoint with filename"""
     file_meta = next(
-        (f for f in st.session_state.file_metadata if f['file_id'] == file_id),
+        (f for f in st.session_state.file_metadata if f['filename'] == filename),
         None
     )
     if not file_meta:
+        logger.error(f"No file metadata found for filename: {filename}")
         return None
-    return f"http://rag-service:8000/preview/{file_id}?user_id={file_meta['user_id']}&X-API-Key={settings.openai_api_key}"
+    file_id = file_meta['file_id']
+    preview_url = f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/preview/{file_id}?user_id={file_meta['user_id']}&X-API-Key={settings.openai_api_key}"
+    logger.debug(f"Generated preview URL: {preview_url}")
+    return preview_url
 
 def update_selected_docs(file_id: str):
     """Callback for document selection checkboxes"""
@@ -157,7 +163,7 @@ def render_document_management(user_id: str):
                     data = {"user_id": user_id}
                     try:
                         response = requests.post(
-                            "http://rag-service:8000/process_file",
+                            f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/process_file",
                             files=files,
                             data=data,
                             headers={"X-API-Key": settings.openai_api_key}
@@ -195,7 +201,7 @@ def render_document_management(user_id: str):
     try:
         with st.spinner("Loading documents..."):
             response = requests.get(
-                f"http://rag-service:8000/documents?user_id={user_id}",
+                f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/documents?user_id={user_id}",
                 headers={"X-API-Key": settings.openai_api_key}
             )
 
@@ -211,18 +217,20 @@ def render_document_management(user_id: str):
 
                         # Preview button
                         with cols[1]:
-                            preview_url = get_file_preview_url(file['file_id'])
+                            preview_url = get_file_preview_url(file['filename'])
                             if preview_url:
                                 st.markdown(
-                                    f'<a href="{preview_url}" target="_blank" style="text-decoration: none;">🔍</a>',
+                                    f'<a href="/preview/{file["filename"]}" target="_blank" style="text-decoration: none;">🔍</a>',
                                     unsafe_allow_html=True
                                 )
+                            else:
+                                st.markdown("🔍", unsafe_allow_html=True)
 
                         # Debug button
                         with cols[2]:
                             st.markdown(
-                                f'<a href="?page=debug&file_id={file["file_id"]}" target="_blank" style="text-decoration: none;">🐞</a>',
-                                    unsafe_allow_html=True
+                                f'<a href="?page=debug&file_id={file["file_id"]}" target="_self" style="text-decoration: none;">🐞</a>',
+                                unsafe_allow_html=True
                             )
 
                         # Delete button
@@ -231,7 +239,7 @@ def render_document_management(user_id: str):
                                 try:
                                     with st.spinner("Deleting..."):
                                         response = requests.delete(
-                                            f"http://rag-service:8000/documents/{file['file_id']}?user_id={user_id}",
+                                            f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/documents/{file['file_id']}?user_id={user_id}",
                                             headers={"X-API-Key": settings.openai_api_key}
                                         )
                                     if response.status_code == 200:
@@ -326,7 +334,7 @@ def render_chat_interface(user_id: str):
                         "chat_id": st.session_state.current_chat_id
                     }
                     response = requests.post(
-                        "http://rag-service:8000/chat",
+                        f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/chat",
                         data=payload,
                         headers={"X-API-Key": settings.openai_api_key}
                     )
@@ -389,7 +397,7 @@ def render_knowledge_graph(user_id: str, file_id: Optional[str] = None):
     st.markdown("### Knowledge Graph")
     try:
         with st.spinner("Loading knowledge graph..."):
-            url = f"http://rag-service:8000/knowledge_graph?user_id={user_id}"
+            url = f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/knowledge_graph?user_id={user_id}"
             if file_id:
                 url += f"&file_id={file_id}"
             logger.debug(f"Requesting knowledge graph from: {url}")
@@ -476,11 +484,11 @@ def render_debug_page():
     try:
         with st.spinner("Querying vector database..."):
             response = requests.post(
-                "http://rag-service:8000/search",
+                f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/search",
                 data={
                     "query": "",
                     "user_id": file_meta['user_id'],
-                    "file_id": file_id,
+                    "file_ids": [file_id],
                     "limit": 50,
                     "use_graph": False
                 },

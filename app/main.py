@@ -794,7 +794,7 @@ def generate_coherent_response(query: str, context: str) -> str:
     """Generate response with proper token management and assistant-like behavior"""
     client = OpenAI(api_key=settings.openai_api_key)
     prompt = (
-        f"Context:\n{context}\n\n"
+       f"Context:\n{context}\n\n"
         f"Query: {query}\n\n"
         "You are a professional personal assistant tasked with providing a clear, concise, and accurate response based solely on the provided context and query. "
         "The context has been preprocessed to minimize OCR errors, but minor issues may remain (e.g., spaces between characters, malformed numbers). "
@@ -802,8 +802,8 @@ def generate_coherent_response(query: str, context: str) -> str:
         "1. Structure the response in a well-organized manner with complete sentences and proper grammar.\n"
         "2. Avoid repetition of words, phrases, or numbers unless necessary for clarity.\n"
         "3. Format numerical values correctly, using a single '$' for currency (e.g., '$1,988.16', '$94.43 per hour').\n"
-        "4. Remove spaces between characters in words, names, or numbers (e.g., 'D z i u b a' → 'Dziuba', '5 0 . 4 3' → '50.43').\n"
-        "5. For tables, ensure proper markdown formatting with aligned columns and no spaces between characters (e.g., '| Zenovii Dziuba | Laborer | 16 | $94.43 per hour | $1,510.88 | $1,143.20 | CPRPreviewSCA_6.pdf (Section 0) |').\n"
+        "4. Remove spaces between characters in words, names, or numbers (e.g., 'J o h n' → 'John', '5 0 . 4 3' → '50.43').\n"
+        "5. For tables, ensure proper markdown formatting with aligned columns and no spaces between characters (e.g., '| John Smith | Laborer | 16 | $94.43 per hour | $1,510.88 | $1,143.20 | PayrollReport_1.pdf (Section 0) |').\n"
         "6. Include a 'Source' column in tables to cite document name and section number for each piece of information.\n"
         "7. Include relevant entities or relationships only if they directly contribute to answering the query.\n"
         "8. Do not speculate or include information not present in the context or query.\n"
@@ -815,12 +815,12 @@ def generate_coherent_response(query: str, context: str) -> str:
         "14. If hours or rates are missing, estimate them using gross pay and typical rates from the context (e.g., $94.43 per hour), noting assumptions.\n"
         "15. If the context or query is unclear, note limitations (e.g., 'Some details may be incomplete due to minor OCR errors').\n\n"
         "Example response for 'What is this document about?':\n"
-        """The document 'CPRPreviewSCA_6.pdf' is a certified payroll report from AMB Contractors Inc. for the P.S. 54 - Bronx project, managed by the New York City School Construction Authority and the Department of Education. This report provides detailed information on wages paid to employees for the week ending April 23, 2023. It includes information about the contractor, subcontractor, and employees, along with their roles, hours worked, hourly rates, and corresponding gross and net pay. The document is signed by Aslam Baig, representing AMB Contractors Inc., and provides the company's address and taxpayer ID. The project is identified by Project ID 22-02603, and the school address is 2703 Webster Avenue, Bronx, NY 10458. Below is a summary of the payroll details:
+        """The document 'PayrollReport_1.pdf' is a certified payroll report from XYZ Construction Ltd. for the Community School Project, managed by the City Education Authority and the Department of Education. This report provides detailed information on wages paid to employees for the week ending April 23, 2023. It includes information about the contractor, subcontractor, and employees, along with their roles, hours worked, hourly rates, and corresponding gross and net pay. The document is signed by Jane Doe, representing XYZ Construction Ltd., and provides the company's address and taxpayer ID. The project is identified by Project ID 23-01234, and the school address is 1234 Main Street, Cityville, NY 10458. Below is a summary of the payroll details:
 
 | Employee | Role | Hours | Rate | Gross Pay | Net Pay | Source |
 |----------|------|-------|------|-----------|---------|--------|
-| Zenovii Dziuba | Laborer | 16 | $94.43 per hour | $1,510.88 | $1,143.20 | CPRPreviewSCA_6.pdf (Section 0) |
-| Ermilo Lopez | Laborer | 8 | $94.43 per hour | $755.44 | $608.65 | CPRPreviewSCA_6.pdf (Section 0) |
+| John Smith | Laborer | 16 | $94.43 per hour | $1,510.88 | $1,143.20 | PayrollReport_1.pdf (Section 0) |
+| Michael Brown | Laborer | 8 | $94.43 per hour | $755.44 | $608.65 | PayrollReport_1.pdf (Section 0) |
 
 <!-- Assumed currency as USD based on context -->"""
     )
@@ -834,14 +834,14 @@ def generate_coherent_response(query: str, context: str) -> str:
                         "You are a professional personal assistant. Provide clear, concise, and accurate responses based strictly on the provided context and query. "
                         "The context has been preprocessed to minimize OCR errors, but minor issues may remain. "
                         "Structure responses with complete sentences, proper grammar, and correct spelling. "
-                        "Remove spaces between characters in words, names, or numbers (e.g., 'D z i u b a' → 'Dziuba', '5 0 . 4 3' → '50.43'). "
+                        "Remove spaces between characters in words, names, or numbers (e.g., 'J o h n' → 'John', '5 0 . 4 3' → '50.43'). "
                         "Format numbers correctly, using a single '$' for currency (e.g., '$1,988.16', '$94.43 per hour'). "
                         "For payroll-related queries, present details in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay, Source. "
                         "Validate numerical consistency: Gross Pay = Hours × Rate, Net Pay < Gross Pay. Use context-provided rates (e.g., $94.43 per hour) if available. "
                         "Only include total expenditure if explicitly requested in the query (e.g., 'total', 'expenditure', 'spent'). "
                         "Estimate missing hours or rates using context data, noting assumptions. "
                         "Do not speculate or add information beyond the context or query. "
-                        "Note limitations due to minor OCR errors if applicable."
+                        "Note limitations due to minor OCR errs if applicable."
                     )
                 },
                 {"role": "user", "content": prompt}

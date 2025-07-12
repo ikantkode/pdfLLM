@@ -47,7 +47,7 @@ docker compose up -d --build
 
 - ✅ OCR-aware chunk cleaning
 - ✅ Graph-enhanced search results
-- 🔜 Replace networkx with dgraph
+- ✅Replace networkx with dgraph
 - 🔜 Ollama / Local LLM support
 - 🔜 JWT authentication
 - 🔜 Dynamic embedding model selection (OpenAI, DeepSeek, Grok)
