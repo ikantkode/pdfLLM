@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 STATE_FILE = Path(settings.data_dir) / "streamlit_state.json"
-FASTAPI_HOST = "192.168.1.107"  # Replace with your local IP or hostname
+FASTAPI_HOST = "rag-service"  # Replace with your local IP or hostname
 FASTAPI_PORT = "8000"  # FastAPI service port
 
 class SessionState:
