@@ -8,7 +8,7 @@ Using quantized models via Ollama will *severely* output the level of results yo
 
 | Provider    | Model                       | Dimensions | Max Tokens | Price (\$ / 1M tokens)           |
 | ----------- | --------------------------- | ---------- | ---------- | -------------------------------- |
-| **OpenAI**  | text‑embedding‑3‑small      | 1,536      | \~8,191    | **\$0.020** ([InvertedStone][1]) |
+| **OpenAI**  | text‑embedding‑3‑small      | 1,536      | \~8,191    | **\$0.020**  |
 |             | text‑embedding‑3‑large      | 3,072      | \~8,191    | **\$0.130**                      |
 | **Google**  | gemini‑embedding‑001        | 3,072      | 2,048      | *Pricing not disclosed*          |
 |             | text‑embedding‑preview‑0409 | 768        | 2,048      | **\$0.025**                      |
