@@ -49,13 +49,13 @@ docker compose up -d --build
 - See below for an issue due to my exhaustion.
     - Currently, you must update config.py in addition to the .env to propagate your settings (for example: if you change your model). 
 
-    # OpenAI settings
+    ### OpenAI settings
     openai_enabled: bool = Field(False, env="OPENAI_ENABLED")
     openai_api_key: str = Field("", env="OPENAI_API_KEY")
     openai_embedding_model: str = Field("text-embedding-3-small", env="OPENAI_EMBEDDING_MODEL")
     openai_chat_model: str = Field("gpt-4o-mini", env="OPENAI_CHAT_MODEL")
 
-    # Ollama settings
+    ### Ollama settings
     ollama_enabled: bool = Field(False, env="OLLAMA_ENABLED")
     ollama_host: str = Field("localhost", env="OLLAMA_HOST")
     ollama_port: int = Field(11434, env="OLLAMA_PORT")
