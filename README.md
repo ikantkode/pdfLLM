@@ -14,7 +14,7 @@ Using quantized models via Ollama will *severely* output the level of results yo
 |             | text‑embedding‑preview‑0409 | 768        | 2,048      | **\$0.025**                      |
 | **Mistral** | mistral‑embed               | 1,024      | 32,768     | **\$0.010**                      |
 
-We are truncating dimensions to 1,204 so that we have consistency across the board and we are also limiting the max tokens per embedding request to 8,000 - this way if a document is large and has biggeer context window, it is sent in chunks to be processed into vector embeddings which is then saved into qdrant and dgraph accordingly.
+We are truncating dimensions to 1,024 so that we have consistency across the board and we are also limiting the max tokens per embedding request to 8,000 - this way if a document is large and has biggeer context window, it is sent in chunks to be processed into vector embeddings which is then saved into qdrant and dgraph accordingly.
 
 I think the best way to visualize tokens is to go to any LLM (ChatGPT/DeepSeek/Meta.ai) and request each chat instance to give a story in 1024 tokens, 2048, 4096, 8,000 and you will see just the amount of words that come out. If you have a RAG app deployed, you are easily able to orchestrate between multiple modules of your SaaS App, have separate summariziations of different documents, and then connect them all together for a summary.
 
