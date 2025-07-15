@@ -30,7 +30,7 @@ Documents are parsed, cleaned (OCR-aware), chunked, embedded, and indexed both i
 ```bash
 git clone https://github.com/ikantkode/pdfLLM.git
 cd pdfLLM
-mv env_example .env  # add your OpenAI and Qdrant configs
+mv env_example .env
 docker compose up -d --build
 ```
 
@@ -40,14 +40,36 @@ docker compose up -d --build
 - Summarize project submissions and funding reports.
 - Ask structured questions like "How many hours did the carpenter work in April?"
 
+## Current Issues:
+
+- Larger PDFs might be troublesome to process due to limited context window.
+- My Ollama on a 3060 (12GB VRAM) can only run Q4 embedding and chat models, thus, the results are not as coherent so don't be surprised.
+- Tests have only been conducted with single PDFs (upto 40 pages) - context limits are an issue. 
+- I dont know how to run evaluations on this rag app yet. :/ I am interested though.
+- See below for an issue due to my exhaustion.
+    - Currently, you must update config.py in addition to the .env to propagate your settings (for example: if you change your model). 
+
+ # OpenAI settings
+    openai_enabled: bool = Field(False, env="OPENAI_ENABLED")
+    openai_api_key: str = Field("", env="OPENAI_API_KEY")
+    openai_embedding_model: str = Field("text-embedding-3-small", env="OPENAI_EMBEDDING_MODEL")
+    openai_chat_model: str = Field("gpt-4o-mini", env="OPENAI_CHAT_MODEL")
+
+    # Ollama settings
+    ollama_enabled: bool = Field(False, env="OLLAMA_ENABLED")
+    ollama_host: str = Field("localhost", env="OLLAMA_HOST")
+    ollama_port: int = Field(11434, env="OLLAMA_PORT")
+    ollama_embedding_model: str = Field("bge-m3:latest", env="OLLAMA_EMBEDDING_MODEL")
+    ollama_chat_model: str = Field("llama3.1:8b", env="OLLAMA_CHAT_MODEL")
+
 ## Roadmap
 
 - ✅ OCR-aware chunk cleaning
 - ✅ Graph-enhanced search results
 - ✅ Replace networkx with dgraph
-- 🔜 Ollama / Local LLM support
+- ✅ Ollama / Local LLM support
 - 🔜 JWT authentication
-- 🔜 Dynamic embedding model selection (OpenAI, DeepSeek, Grok)
+- 🔜 Dynamic embedding/chat model selection (OpenAI, DeepSeek, Grok)
 
 ## License
 

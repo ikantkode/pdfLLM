@@ -1,6 +1,14 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, model_validator
 from typing import List, Dict
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 class Settings(BaseSettings):
     # Application settings
@@ -23,9 +31,19 @@ class Settings(BaseSettings):
     }
 
     # OpenAI settings
-    openai_api_key: str = Field(..., env="OPENAI_API_KEY")
-    embedding_model: str = "text-embedding-3-small"
-    chat_model: str = "gpt-4-turbo"
+    openai_enabled: bool = Field(False, env="OPENAI_ENABLED")
+    openai_api_key: str = Field("", env="OPENAI_API_KEY")
+    openai_embedding_model: str = Field("text-embedding-3-small", env="OPENAI_EMBEDDING_MODEL")
+    openai_chat_model: str = Field("gpt-4o-mini", env="OPENAI_CHAT_MODEL")
+
+    # Ollama settings
+    ollama_enabled: bool = Field(False, env="OLLAMA_ENABLED")
+    ollama_host: str = Field("localhost", env="OLLAMA_HOST")
+    ollama_port: int = Field(11434, env="OLLAMA_PORT")
+    ollama_embedding_model: str = Field("bge-m3:latest", env="OLLAMA_EMBEDDING_MODEL")
+    ollama_chat_model: str = Field("llama3.1:8b", env="OLLAMA_CHAT_MODEL")
+
+    # Common model settings
     max_embedding_tokens: int = 8191
     max_completion_tokens: int = 4096
 
@@ -48,5 +66,11 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore"
     )
+
+    @model_validator(mode='after')
+    def log_settings(self):
+        logger.info(f"OPENAI_ENABLED: {self.openai_enabled}")
+        logger.info(f"OLLAMA_ENABLED: {self.ollama_enabled}")
+        return self
 
 settings = Settings()

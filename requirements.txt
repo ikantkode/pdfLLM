@@ -25,6 +25,7 @@ tiktoken==0.8.0
 qdrant-client==1.12.0
 spacy==3.7.6
 tenacity==8.5.0
+nltk==3.9.1
 
 # Web/API utilities
 python-multipart==0.0.12

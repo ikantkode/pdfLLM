@@ -1,4 +1,5 @@
 version: '3.8'
+
 services:
   rag-service:
     build: .
@@ -6,9 +7,10 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./app:/app
       - ./data:/app/data
       - ./data/logs:/app/data/logs
+    env_file:
+      - .env
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - DGRAPH_TOKEN=${DGRAPH_TOKEN}
@@ -17,6 +19,7 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_started
+
   streamlit-service:
     build: .
     command: streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0
@@ -26,6 +29,8 @@ services:
       - ./app:/app
       - ./data:/app/data
       - ./data/logs:/app/data/logs
+    env_file:
+      - .env
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - DGRAPH_TOKEN=${DGRAPH_TOKEN}
@@ -34,12 +39,14 @@ services:
         condition: service_started
       dgraph:
         condition: service_healthy
+
   qdrant:
     image: qdrant/qdrant:latest
     ports:
       - "6333:6333"
     volumes:
       - pdfllm_qdrant-data:/qdrant/storage
+
   dgraph:
     image: dgraph/standalone:latest
     ports:
@@ -53,6 +60,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
 volumes:
   pdfllm_qdrant-data:
   pdfllm_dgraph-data:

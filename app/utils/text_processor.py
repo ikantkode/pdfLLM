@@ -5,9 +5,20 @@ from typing import List, Dict, Any, Tuple
 import spacy
 from openai import OpenAI
 import tiktoken
+import requests
 from config import settings
 from tenacity import retry, stop_after_attempt, wait_exponential
+import nltk
+from nltk.tokenize import sent_tokenize
 
+# Download required NLTK data
+nltk.download('punkt', quiet=True)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO if not settings.debug else logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 class TextProcessor:
@@ -18,13 +29,32 @@ class TextProcessor:
         except Exception as e:
             logger.error(f"Failed to load Spacy model: {str(e)}")
             raise
-        
-        if not settings.openai_api_key:
-            raise ValueError("openai_api_key is not configured in settings")
-            
-        self.client = OpenAI(api_key=settings.openai_api_key)
-        self.tokenizer = tiktoken.encoding_for_model(settings.embedding_model)
-        self.max_tokens = 8000  # Slightly below 8192 to be safe
+
+        # Validate provider settings
+        if settings.openai_enabled and settings.ollama_enabled:
+            logger.error("Both OpenAI and Ollama are enabled. Only one provider can be active.")
+            raise ValueError("Invalid configuration: Both OPENAI_ENABLED and OLLAMA_ENABLED are set to true.")
+        if not settings.openai_enabled and not settings.ollama_enabled:
+            logger.error("No provider enabled. Either OPENAI_ENABLED or OLLAMA_ENABLED must be set to true.")
+            raise ValueError("Invalid configuration: Neither OPENAI_ENABLED nor OLLAMA_ENABLED is set to true.")
+
+        # Initialize OpenAI client only if OpenAI is enabled
+        self.client = OpenAI(api_key=settings.openai_api_key) if settings.openai_enabled else None
+
+        # Select tokenizer based on enabled provider
+        try:
+            if settings.openai_enabled:
+                self.tokenizer = tiktoken.encoding_for_model(settings.openai_embedding_model)
+                logger.info(f"Tokenizer initialized for OpenAI model: {settings.openai_embedding_model}")
+            else:  # Ollama enabled
+                # Ollama uses cl100k_base tokenizer for compatibility
+                self.tokenizer = tiktoken.get_encoding("cl100k_base")
+                logger.info("Tokenizer initialized for Ollama with cl100k_base")
+        except Exception as e:
+            logger.error(f"Tokenizer initialization failed: {str(e)}")
+            raise
+
+        self.max_tokens = settings.max_embedding_tokens
 
     def clean_markdown(self, text: str) -> str:
         """Clean markdown text by removing excessive whitespace and special characters"""
@@ -36,8 +66,9 @@ class TextProcessor:
         text = text.strip()
         return text
 
-    def chunk_text(self, text: str, max_tokens: int = settings.max_embedding_tokens) -> List[Dict]:
+    def chunk_text(self, text: str, max_tokens: int = None) -> List[Dict]:
         """Split text into chunks, preserving table structures, using tiktoken for accurate token counting"""
+        max_tokens = max_tokens or self.max_tokens
         table_pattern = r'(\|.*?\|\n(?:\|[-: ]+\|\n)+.*?)(?=\n\n|\Z)'
         tables = re.findall(table_pattern, text, re.DOTALL)
         non_table_text = re.sub(table_pattern, 'TABLE_PLACEHOLDER', text)
@@ -164,16 +195,17 @@ class TextProcessor:
                         "relationships": []
                     })
                     chunk_index += 1
-            placeholder_count += 1
+                placeholder_count += 1
 
         logger.info(f"Chunked text into {len(chunks)} chunks with max {max_tokens} tokens")
         return chunks
 
     def _extract_section(self, text: str) -> str:
+        """Extract the parent section from markdown text"""
         lines = text.split('\n')
         for line in lines:
             if line.startswith('#'):
-                return line.strip('# ').strip()
+                return line.strip('# ').strip() or "N/A"
         return "N/A"
 
     async def extract_entities(self, text: str) -> List[str]:
@@ -183,11 +215,9 @@ class TextProcessor:
             entities = []
             for ent in doc.ents:
                 if ent.label_ in ["PERSON", "ORG", "GPE", "NORP", "PRODUCT", "EVENT"]:
-                    cleaned_entity = re.sub(r'[\n\r\t]', ' ', ent.text).strip()
-                    cleaned_entity = re.sub(r'\s+', ' ', cleaned_entity)
-                    # Skip entities containing metadata keywords or invalid characters
+                    cleaned_entity = self._sanitize_entity(ent.text)
                     if (cleaned_entity and len(cleaned_entity) <= 255 and 
-                        not re.search(r'\b(Date|Signature)\b', cleaned_entity, re.IGNORECASE)):
+                        not self._contains_metadata(cleaned_entity)):
                         entities.append(cleaned_entity)
             entities = list(set(entities))
             logger.debug(f"Extracted entities: {entities}")
@@ -202,88 +232,171 @@ class TextProcessor:
         reraise=True
     )
     async def extract_relationships(self, chunk: Dict) -> List[Dict]:
-        """Extract relationships from chunk, ensuring subjects and objects are sanitized"""
+        """Extract relationships from chunk, ensuring subjects and objects are sanitized.
+        
+        Args:
+            chunk: Dictionary containing text content with keys 'content' and 'chunk_index'
+            
+        Returns:
+            List of dictionaries with 'subject', 'predicate', 'object' keys, or empty list on error
+        """
+        # Validate input
+        if not isinstance(chunk, dict) or 'content' not in chunk:
+            logger.error("Invalid chunk format - missing 'content' key")
+            return []
+        
+        content = str(chunk['content'])[:10000]  # Truncate very long content to prevent API issues
+        chunk_index = chunk.get('chunk_index', 'unknown')
+        
         prompt = (
-            "Extract precise relationships (e.g., 'person works at organization', 'entity is located in place', 'organization owns product') "
+            "Extract precise relationships (e.g., 'person works at organization', 'entity is located in place') "
             "from the following text. Return a JSON object with a 'relationships' key containing a list of "
-            "{subject, predicate, object} dictionaries. Ensure the response is valid JSON and relationships are specific and meaningful. "
-            "Sanitize subjects and objects by removing newlines, tabs, and excessive spaces, and exclude entities containing 'Date' or 'Signature'. "
-            "If no relationships are found, return an empty list under 'relationships'. "
-            "Do not include markdown code blocks or extra text.\n\n"
-            f"Text: {chunk['content']}\n\n"
+            "{subject, predicate, object} dictionaries. Follow these rules:\n"
+            "1. Ensure response is valid JSON\n"
+            "2. Relationships must be specific and meaningful\n"
+            "3. Sanitize subjects/objects (remove newlines, tabs, excessive spaces)\n"
+            "4. Exclude entities containing 'Date' or 'Signature'\n"
+            "5. If no relationships, return {'relationships': []}\n"
+            "6. No markdown code blocks or extra text\n\n"
+            f"Text: {content}\n\n"
             "Example output:\n"
-            "{\"relationships\": [{\"subject\": \"John Doe\", \"predicate\": \"works at\", \"object\": \"Acme Corp\"}, {\"subject\": \"Acme Corp\", \"predicate\": \"owns\", \"object\": \"Product X\"}]}"
+            "{\"relationships\": [{\"subject\": \"John Doe\", \"predicate\": \"works at\", \"object\": \"Acme Corp\"}]}"
         )
 
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an expert in relationship extraction. Return valid JSON with a 'relationships' key "
-                            "containing a list of dictionaries with 'subject', 'predicate', and 'object' keys. "
-                            "Sanitize subjects and objects by removing newlines, tabs, and excessive spaces. "
-                            "Exclude relationships where subject or object contains 'Date' or 'Signature'. "
-                            "If no relationships are found, return {\"relationships\": []}. "
-                            "Do not include markdown code blocks or extra text."
-                        )
+            if settings.openai_enabled:
+                response = self.client.chat.completions.create(
+                    model=settings.openai_chat_model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are an expert relationship extractor. Follow these rules:\n"
+                                "1. Return ONLY valid JSON with {'relationships': [...]}\n"
+                                "2. Each relationship must have subject, predicate, object\n"
+                                "3. Sanitize text (no newlines/tabs, minimal spaces)\n"
+                                "4. Exclude Date/Signature entities\n"
+                                "5. No explanations or extra text\n"
+                                "6. If uncertain, omit the relationship"
+                            )
+                        },
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    max_tokens=300,
+                    temperature=0.2  # Lower temperature for more consistent results
+                )
+                raw_response = response.choices[0].message.content.strip()
+            else:  # Ollama enabled
+                response = requests.post(
+                    f"http://{settings.ollama_host}:{settings.ollama_port}/api/chat",
+                    json={
+                        "model": settings.ollama_chat_model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are an expert relationship extractor. Rules:\n"
+                                    "1. Return ONLY valid JSON with {'relationships': [...]}\n"
+                                    "2. Each relationship must have subject, predicate, object\n"
+                                    "3. Sanitize text (no newlines/tabs, minimal spaces)\n"
+                                    "4. Exclude Date/Signature entities\n"
+                                    "5. No markdown, explanations, or extra text\n"
+                                    "6. If uncertain, omit the relationship"
+                                )
+                            },
+                            {"role": "user", "content": prompt}
+                        ],
+                        "options": {
+                            "temperature": 0.2,
+                            "num_ctx": 2048
+                        },
+                        "format": "json",
+                        "stream": False
                     },
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=300,
-                temperature=0.3
-            )
+                    timeout=30  # Add timeout to prevent hanging
+                )
+                response.raise_for_status()
+                raw_response = response.json().get("message", {}).get("content", "").strip()
+                logger.debug(f"Raw Ollama response for chunk {chunk_index}: {raw_response[:200]}...")  # Log truncated response
 
-            raw_response = response.choices[0].message.content.strip()
-
-            if not raw_response:
-                logger.error(f"Empty response for chunk {chunk['chunk_index']}")
+            # Clean and parse response
+            cleaned_response = raw_response
+            
+            # Remove all markdown code blocks
+            cleaned_response = re.sub(r'```(json)?\s*|\s*```', '', cleaned_response, flags=re.MULTILINE)
+            
+            # Remove any non-JSON text before/after the JSON object
+            json_match = re.search(r'\{.*\}', cleaned_response, re.DOTALL)
+            if not json_match:
+                logger.warning(f"No JSON object found in chunk {chunk_index} response")
                 return []
+                
+            cleaned_response = json_match.group(0)
+            
+            # Fix common JSON issues
+            cleaned_response = re.sub(r',\s*([\]\}])', r'\1', cleaned_response)  # Trailing commas
+            cleaned_response = re.sub(r'[\x00-\x1f]', '', cleaned_response)  # Remove control chars
 
             try:
-                result = json.loads(raw_response)
-                if not isinstance(result, dict) or 'relationships' not in result:
-                    logger.error(f"Invalid JSON structure for chunk {chunk['chunk_index']}: missing 'relationships' key")
-                    logger.debug(f"Problematic response: {raw_response}")
+                result = json.loads(cleaned_response)
+                if not isinstance(result, dict):
+                    logger.warning(f"Response is not a dictionary in chunk {chunk_index}")
                     return []
-
-                if not isinstance(result['relationships'], list):
-                    logger.error(f"'relationships' is not a list in chunk {chunk['chunk_index']}")
-                    logger.debug(f"Problematic response: {raw_response}")
+                    
+                relationships = result.get('relationships', [])
+                if not isinstance(relationships, list):
+                    logger.warning(f"'relationships' is not a list in chunk {chunk_index}")
                     return []
 
                 valid_relationships = []
-                for rel in result['relationships']:
-                    if isinstance(rel, dict) and all(key in rel for key in ['subject', 'predicate', 'object']):
-                        # Sanitize subject and object
-                        subject = re.sub(r'[\n\r\t]', ' ', rel['subject']).strip()
-                        subject = re.sub(r'\s+', ' ', subject)
-                        object_ = re.sub(r'[\n\r\t]', ' ', rel['object']).strip()
-                        object_ = re.sub(r'\s+', ' ', object_)
-                        if (subject and object_ and len(subject) <= 255 and len(object_) <= 255 and
-                            not re.search(r'\b(Date|Signature)\b', subject, re.IGNORECASE) and
-                            not re.search(r'\b(Date|Signature)\b', object_, re.IGNORECASE)):
+                for rel in relationships:
+                    if not isinstance(rel, dict):
+                        continue
+                        
+                    try:
+                        subject = self._sanitize_entity(rel.get('subject', ''))
+                        predicate = str(rel.get('predicate', '')).strip()
+                        object_ = self._sanitize_entity(rel.get('object', ''))
+                        
+                        if (subject and predicate and object_ and
+                            len(subject) <= 255 and len(object_) <= 255 and
+                            not self._contains_metadata(subject) and
+                            not self._contains_metadata(object_)):
                             valid_relationships.append({
                                 'subject': subject,
-                                'predicate': rel['predicate'],
+                                'predicate': predicate,
                                 'object': object_
                             })
-                        else:
-                            logger.warning(f"Invalid relationship in chunk {chunk['chunk_index']}: {rel}")
-                    else:
-                        logger.warning(f"Invalid relationship format in chunk {chunk['chunk_index']}: {rel}")
+                    except Exception as e:
+                        logger.debug(f"Error processing relationship in chunk {chunk_index}: {str(e)}")
 
-                logger.debug(f"Extracted relationships for chunk {chunk['chunk_index']}: {valid_relationships}")
+                logger.info(f"Extracted {len(valid_relationships)} valid relationships from chunk {chunk_index}")
                 return valid_relationships
+                
             except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse JSON for chunk {chunk['chunk_index']}: {str(e)}")
-                logger.debug(f"Problematic response: {raw_response}")
+                logger.error(f"JSON decode failed for chunk {chunk_index}: {str(e)}")
+                logger.debug(f"Problematic response: {cleaned_response[:200]}...")
                 return []
-        except Exception as e:
-            logger.error(f"Failed to extract relationships for chunk {chunk['chunk_index']}: {str(e)}")
+                
+        except requests.RequestException as e:
+            logger.error(f"API request failed for chunk {chunk_index}: {str(e)}")
             return []
+        except Exception as e:
+            logger.error(f"Unexpected error processing chunk {chunk_index}: {str(e)}", exc_info=True)
+            return []
+
+    def _sanitize_entity(self, text: str) -> str:
+        """Sanitize entity text by removing unwanted characters and normalizing whitespace"""
+        if not isinstance(text, str):
+            return ""
+        text = re.sub(r'[\n\r\t]', ' ', text)  # Remove line breaks and tabs
+        text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
+        return text.strip()[:255]  # Enforce max length
+
+    def _contains_metadata(self, text: str) -> bool:
+        """Check if text contains metadata keywords to exclude"""
+        return bool(re.search(r'\b(Date|Signature|Page|Time)\b', text, re.IGNORECASE))
 
     @retry(
         stop=stop_after_attempt(3),
@@ -293,20 +406,41 @@ class TextProcessor:
     async def generate_embeddings(self, text: str) -> List[Tuple[str, List[float]]]:
         """Generate embeddings for text chunks, including entity and relationship extraction"""
         chunks = self.chunk_text(text)
-        embeddings = []
-
-        for chunk in chunks:
-            try:
+        texts = [chunk['content'] for chunk in chunks]
+        try:
+            if settings.openai_enabled:
                 response = self.client.embeddings.create(
-                    input=chunk['content'],
-                    model=settings.embedding_model
+                    input=texts,
+                    model=settings.openai_embedding_model,
+                    dimensions=1024  # Truncate to 1024 dimensions
                 )
-                embedding = response.data[0].embedding
+                embeddings = [item.embedding for item in response.data]
+                logger.info(f"OpenAI embeddings generated with {len(embeddings[0])} dimensions")
+            else:  # Ollama enabled
+                embeddings = []
+                for text in texts:
+                    response = requests.post(
+                        f"http://{settings.ollama_host}:{settings.ollama_port}/api/embeddings",
+                        json={
+                            "model": settings.ollama_embedding_model,
+                            "prompt": text
+                        },
+                        timeout=30
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    logger.debug(f"Ollama response for chunk {chunks[len(embeddings)]['chunk_index']}: {data}")
+                    embeddings.append(data["embedding"])
+                logger.info(f"Ollama embeddings generated with {len(embeddings[0])} dimensions")
+
+            result = []
+            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
                 chunk['entities'] = await self.extract_entities(chunk['content'])
                 chunk['relationships'] = await self.extract_relationships(chunk)
-                embeddings.append((chunk['content'], embedding))
+                result.append((chunk['content'], embedding))
                 logger.info(f"Generated embedding for chunk {chunk['chunk_index']} with {len(self.tokenizer.encode(chunk['content']))} tokens")
-            except Exception as e:
-                logger.error(f"Embedding generation failed for chunk {chunk['chunk_index']}: {str(e)}")
-                raise
+            return result
+        except Exception as e:
+            logger.error(f"Embedding generation failed: {str(e)}")
+            raise
         return embeddings

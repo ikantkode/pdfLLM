@@ -29,6 +29,7 @@ import tiktoken
 import pydgraph
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from openai import OpenAI
+import requests
 from pydantic import BaseModel
 from utils.qdrant_handler import QdrantHandler
 from utils.text_processor import TextProcessor
@@ -77,12 +78,27 @@ app.add_middleware(
 api_key_header = APIKeyHeader(name="X-API-Key")
 
 async def validate_api_key(api_key: str = Depends(api_key_header)):
-    if api_key != settings.openai_api_key:
+    if settings.openai_enabled and api_key != settings.openai_api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API Key"
         )
     return api_key
+
+# Check provider configuration
+def validate_provider_settings():
+    if settings.openai_enabled and settings.ollama_enabled:
+        logger.error("Both OpenAI and Ollama are enabled. Only one provider can be active.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid configuration: Both OPENAI_ENABLED and OLLAMA_ENABLED are set to true. Please enable only one provider."
+        )
+    if not settings.openai_enabled and not settings.ollama_enabled:
+        logger.error("No provider enabled. Either OPENAI_ENABLED or OLLAMA_ENABLED must be set to true.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid configuration: Neither OPENAI_ENABLED nor OLLAMA_ENABLED is set to true."
+        )
 
 # Initialize OCR processor
 ocr_processor = OCRProcessor()
@@ -95,11 +111,7 @@ ocr_processor = OCRProcessor()
 )
 def initialize_qdrant_handler():
     try:
-        qdrant_handler = QdrantHandler(
-            host=settings.qdrant_host,
-            port=settings.qdrant_port,
-            collection_name=settings.qdrant_collection
-        )
+        qdrant_handler = QdrantHandler()
         logger.info("Qdrant connection established")
         return qdrant_handler
     except Exception as e:
@@ -161,7 +173,6 @@ class SearchResult(BaseModel):
 # Knowledge Graph for advanced indexing
 class KnowledgeGraph:
     def __init__(self):
-        # Updated connection syntax for pydgraph 24.2.1+
         self.client = pydgraph.DgraphClient(
             pydgraph.DgraphClientStub(f"{settings.dgraph_host}:{settings.dgraph_port}")
         )
@@ -208,13 +219,11 @@ class KnowledgeGraph:
         weight: float = 1.0
     ) -> None:
         """Add a relationship between entities or entity and document"""
-        # Sanitize source and target to remove problematic characters
         source = re.sub(r'[\n\r\t]', ' ', source).strip()
         target = re.sub(r'[\n\r\t]', ' ', target).strip()
         source = re.sub(r'\s+', ' ', source)
         target = re.sub(r'\s+', ' ', target)
         
-        # Skip if source or target is empty, too long, or contains metadata keywords
         if (not source or not target or len(source) > 255 or len(target) > 255 or
             re.search(r'\b(Date|Signature)\b', source, re.IGNORECASE) or
             re.search(r'\b(Date|Signature)\b', target, re.IGNORECASE)):
@@ -224,7 +233,6 @@ class KnowledgeGraph:
         logger.debug(f"Adding relationship: {source} -> {relationship} -> {target}")
         txn = self.client.txn()
         try:
-            # Check if source entity exists
             query = f"""
                 query {{
                     source(func: eq(name, "{source}")) {{
@@ -252,7 +260,6 @@ class KnowledgeGraph:
                 source_node = source_node[0]
                 mutation = {"uid": source_node["uid"]}
 
-            # Check if target is a document or entity
             query = f"""
                 query {{
                     target(func: eq(document_id, "{target}")) {{
@@ -299,7 +306,6 @@ class KnowledgeGraph:
                         "weight": weight
                     }]
 
-            # Perform mutation
             txn.mutate(set_obj=mutation)
             txn.commit()
             logger.debug(f"Added relationship: {source} -> {relationship} -> {target}")
@@ -314,7 +320,6 @@ class KnowledgeGraph:
         depth: int = settings.max_graph_depth
     ) -> List[str]:
         """Find related entities within specified depth"""
-        # Sanitize entity input
         entity = re.sub(r'[\n\r\t]', ' ', entity).strip()
         entity = re.sub(r'\s+', ' ', entity)
         if not entity or len(entity) > 255 or re.search(r'\b(Date|Signature)\b', entity, re.IGNORECASE):
@@ -473,17 +478,36 @@ def split_large_text(text: str, max_tokens: int = settings.max_embedding_tokens)
 )
 def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
     """Generate embeddings with batch processing and retry logic"""
+    validate_provider_settings()
     try:
-        client = OpenAI(api_key=settings.openai_api_key)
-        response = client.embeddings.create(
-            input=texts,
-            model=settings.embedding_model
-        )
-        return [item.embedding for item in response.data]
+        if settings.openai_enabled:
+            client = OpenAI(api_key=settings.openai_api_key)
+            response = client.embeddings.create(
+                input=texts,
+                model=settings.openai_embedding_model,
+                dimensions=1024  # Truncate to 1024 dimensions
+            )
+            embeddings = [item.embedding for item in response.data]
+            logger.info(f"OpenAI embeddings generated with {len(embeddings[0])} dimensions")
+            return embeddings
+        else:
+            embeddings = []
+            for text in texts:
+                response = requests.post(
+                    f"http://{settings.ollama_host}:{settings.ollama_port}/api/embeddings",
+                    json={
+                        "model": settings.ollama_embedding_model,
+                        "prompt": text  # Send single string
+                    }
+                )
+                response.raise_for_status()
+                data = response.json()
+                embeddings.append(data["embedding"])
+            logger.info(f"Ollama embeddings generated with {len(embeddings[0])} dimensions")
+            return embeddings
     except Exception as e:
         logger.error(f"Embedding generation failed: {str(e)}")
         raise
-
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=4, max=10),
@@ -491,10 +515,15 @@ def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
 )
 async def preprocess_ocr_text(text: str) -> str:
     """Use LLM to clean and reconstruct OCR-extracted text into coherent sentences"""
+    validate_provider_settings()
     chunks = split_large_text(text, max_tokens=settings.max_embedding_tokens // 2)
     cleaned_chunks = []
 
-    client = OpenAI(api_key=settings.openai_api_key)
+    if settings.openai_enabled:
+        client = OpenAI(api_key=settings.openai_api_key)
+    else:
+        client = None  # We'll use requests for Ollama
+
     for chunk in chunks:
         try:
             prompt = (
@@ -539,28 +568,62 @@ async def preprocess_ocr_text(text: str) -> str:
                 "The project was initiated on 05.06.2023 and involved regular safety inspections.\n"
                 "<!-- Signature: Aslam Baig, Date field ignored as metadata -->\n"
             )
-            response = client.chat.completions.create(
-                model=settings.chat_model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an expert at cleaning and reconstructing noisy OCR-extracted text. "
-                            "Correct OCR errors, including spaces between characters in words, names, or numbers. "
-                            "Separate names from metadata like 'Date' or 'Signature' (e.g., 'Aslam Baig \nDate' → 'Aslam Baig'). "
-                            "Format numbers and names properly, ensuring single '$' for currency, and structure the output in clear, coherent markdown. "
-                            "Preserve meaningful information and structural elements (e.g., lists, tables). "
-                            "For payroll data, format details in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay. "
-                            "Validate numerical consistency: Gross Pay = Hours × Rate, Net Pay < Gross Pay. Use context-provided rates (e.g., $94.43 per hour) if available. "
-                            "Note any assumptions made due to ambiguous text in markdown comments."
-                        )
-                    },
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=settings.max_completion_tokens,
-                temperature=0.3
-            )
-            cleaned_chunk = response.choices[0].message.content.strip()
+
+            if settings.openai_enabled:
+                response = client.chat.completions.create(
+                    model=settings.openai_chat_model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are an expert at cleaning and reconstructing noisy OCR-extracted text. "
+                                "Correct OCR errors, including spaces between characters in words, names, or numbers. "
+                                "Separate names from metadata like 'Date' or 'Signature' (e.g., 'Aslam Baig \nDate' → 'Aslam Baig'). "
+                                "Format numbers and names properly, ensuring single '$' for currency, and structure the output in clear, coherent markdown. "
+                                "Preserve meaningful information and structural elements (e.g., lists, tables). "
+                                "For payroll data, format details in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay. "
+                                "Validate numerical consistency: Gross Pay = Hours × Rate, Net Pay < Gross Pay. Use context-provided rates (e.g., $94.43 per hour) if available. "
+                                "Note any assumptions made due to ambiguous text in markdown comments."
+                            )
+                        },
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=settings.max_completion_tokens,
+                    temperature=0.3
+                )
+                cleaned_chunk = response.choices[0].message.content.strip()
+            else:
+                logger.debug(f"Sending OCR preprocessing request to Ollama for chunk: {chunk[:100]}...")
+                response = requests.post(
+                    f"http://{settings.ollama_host}:{settings.ollama_port}/v1/chat/completions",
+                    json={
+                        "model": settings.ollama_chat_model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are an expert at cleaning and reconstructing noisy OCR-extracted text. "
+                                    "Correct OCR errors, including spaces between characters in words, names, or numbers. "
+                                    "Separate names from metadata like 'Date' or 'Signature' (e.g., 'Aslam Baig \nDate' → 'Aslam Baig'). "
+                                    "Format numbers and names properly, ensuring single '$' for currency, and structure the output in clear, coherent markdown. "
+                                    "Preserve meaningful information and structural elements (e.g., lists, tables). "
+                                    "For payroll data, format details in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay. "
+                                    "Validate numerical consistency: Gross Pay = Hours × Rate, Net Pay < Gross Pay. Use context-provided rates (e.g., $94.43 per hour) if available. "
+                                    "Note any assumptions made due to ambiguous text in markdown comments."
+                                    "Return only the cleaned text in markdown format, without wrapping in JSON or markdown code blocks."
+                                )
+                            },
+                            {"role": "user", "content": prompt}
+                        ],
+                        "max_tokens": settings.max_completion_tokens,
+                        "temperature": 0.3
+                    }
+                )
+                response.raise_for_status()
+                logger.debug(f"Ollama API response status: {response.status_code}")
+                cleaned_chunk = response.json()["choices"][0]["message"]["content"].strip()
+                logger.debug(f"Cleaned OCR response: {cleaned_chunk[:200]}...")
+
             cleaned_chunks.append(cleaned_chunk)
             logger.debug(f"Preprocessed chunk: {cleaned_chunk[:200]}...")
         except Exception as e:
@@ -595,7 +658,7 @@ def clean_response(text: str) -> str:
         if line.strip().startswith('|') and not in_table:
             in_table = True
             table_lines = [line]
-        elif in_table and line.strip().startsWith('|'):
+        elif in_table and line.strip().startswith('|'):
             table_lines.append(line)
         elif in_table and not line.strip().startswith('|'):
             in_table = False
@@ -792,9 +855,14 @@ async def build_chat_context(results: List[SearchResult]) -> str:
 )
 def generate_coherent_response(query: str, context: str) -> str:
     """Generate response with proper token management and assistant-like behavior"""
-    client = OpenAI(api_key=settings.openai_api_key)
+    validate_provider_settings()
+    if settings.openai_enabled:
+        client = OpenAI(api_key=settings.openai_api_key)
+    else:
+        client = None  # We'll use requests for Ollama
+
     prompt = (
-       f"Context:\n{context}\n\n"
+        f"Context:\n{context}\n\n"
         f"Query: {query}\n\n"
         "You are a professional personal assistant tasked with providing a clear, concise, and accurate response based solely on the provided context and query. "
         "The context has been preprocessed to minimize OCR errors, but minor issues may remain (e.g., spaces between characters, malformed numbers). "
@@ -825,31 +893,62 @@ def generate_coherent_response(query: str, context: str) -> str:
 <!-- Assumed currency as USD based on context -->"""
     )
     try:
-        response = client.chat.completions.create(
-            model=settings.chat_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a professional personal assistant. Provide clear, concise, and accurate responses based strictly on the provided context and query. "
-                        "The context has been preprocessed to minimize OCR errors, but minor issues may remain. "
-                        "Structure responses with complete sentences, proper grammar, and correct spelling. "
-                        "Remove spaces between characters in words, names, or numbers (e.g., 'J o h n' → 'John', '5 0 . 4 3' → '50.43'). "
-                        "Format numbers correctly, using a single '$' for currency (e.g., '$1,988.16', '$94.43 per hour'). "
-                        "For payroll-related queries, present details in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay, Source. "
-                        "Validate numerical consistency: Gross Pay = Hours × Rate, Net Pay < Gross Pay. Use context-provided rates (e.g., $94.43 per hour) if available. "
-                        "Only include total expenditure if explicitly requested in the query (e.g., 'total', 'expenditure', 'spent'). "
-                        "Estimate missing hours or rates using context data, noting assumptions. "
-                        "Do not speculate or add information beyond the context or query. "
-                        "Note limitations due to minor OCR errs if applicable."
-                    )
-                },
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=settings.max_completion_tokens,
-            temperature=0.3
-        )
-        response_text = response.choices[0].message.content.strip()
+        if settings.openai_enabled:
+            response = client.chat.completions.create(
+                model=settings.openai_chat_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a professional personal assistant. Provide clear, concise, and accurate responses based strictly on the provided context and query. "
+                            "The context has been preprocessed to minimize OCR errors, but minor issues may remain. "
+                            "Structure responses with complete sentences, proper grammar, and correct spelling. "
+                            "Remove spaces between characters in words, names, or numbers (e.g., 'J o h n' → 'John', '5 0 . 4 3' → '50.43'). "
+                            "Format numbers correctly, using a single '$' for currency (e.g., '$1,988.16', '$94.43 per hour'). "
+                            "For payroll-related queries, present details in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay, Source. "
+                            "Validate numerical consistency: Gross Pay = Hours × Rate, Net Pay < Gross Pay. Use context-provided rates (e.g., $94.43 per hour) if available. "
+                            "Only include total expenditure if explicitly requested in the query (e.g., 'total', 'expenditure', 'spent'). "
+                            "Estimate missing hours or rates using context data, noting assumptions. "
+                            "Do not speculate or add information beyond the context or query. "
+                            "Note limitations due to minor OCR errs if applicable."
+                        )
+                    },
+                    {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=settings.max_completion_tokens,
+                    temperature=0.3
+                )
+            response_text = response.choices[0].message.content.strip()
+        else:
+            response = requests.post(
+                f"http://{settings.ollama_host}:{settings.ollama_port}/v1/chat/completions",
+                json={
+                    "model": settings.ollama_chat_model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a professional personal assistant. Provide clear, concise, and accurate responses based strictly on the provided context and query. "
+                                "The context has been preprocessed to minimize OCR errors, but minor issues may remain. "
+                                "Structure responses with complete sentences, proper grammar, and correct spelling. "
+                                "Remove spaces between characters in words, names, or numbers (e.g., 'J o h n' → 'John', '5 0 . 4 3' → '50.43'). "
+                                "Format numbers correctly, using a single '$' for currency (e.g., '$1,988.16', '$94.43 per hour'). "
+                                "For payroll-related queries, present details in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay, Source. "
+                                "Validate numerical consistency: Gross Pay = Hours × Rate, Net Pay < Gross Pay. Use context-provided rates (e.g., $94.43 per hour) if available. "
+                                "Only include total expenditure if explicitly requested in the query (e.g., 'total', 'expenditure', 'spent'). "
+                                "Estimate missing hours or rates using context data, noting assumptions. "
+                                "Do not speculate or add information beyond the context or query. "
+                                "Note limitations due to minor OCR errs if applicable."
+                            )
+                        },
+                        {"role": "user", "content": prompt}
+                    ],
+                    "max_tokens": settings.max_completion_tokens,
+                    "temperature": 0.3
+                }
+            )
+            response.raise_for_status()
+            response_text = response.json()["choices"][0]["message"]["content"].strip()
         response_text = clean_response(response_text)
         logger.debug(f"Generated response: {response_text[:500]}...")
         return response_text
@@ -881,6 +980,7 @@ async def process_file(
     api_key: str = Depends(validate_api_key)
 ):
     """Process uploaded file and extract knowledge"""
+    validate_provider_settings()
     if file.size > settings.max_document_size:
         raise HTTPException(
             status_code=400,
@@ -1008,6 +1108,7 @@ async def search_documents(
     api_key: str = Depends(validate_api_key)
 ):
     """Search documents with dual-level retrieval"""
+    validate_provider_settings()
     try:
         cleaned_query = clean_query(query)
         logger.debug(f"Original query: {query}")
@@ -1071,6 +1172,7 @@ async def chat_with_documents(
     api_key: str = Depends(validate_api_key)
 ):
     """Chat with document context"""
+    validate_provider_settings()
     try:
         cleaned_query = clean_query(query)
         logger.debug(f"Original query: {query}")
@@ -1225,7 +1327,6 @@ async def get_knowledge_graph(
 
         txn = knowledge_graph.client.txn(read_only=True)
         try:
-            # Query for entities and documents
             query = """
                 query {
                     entities(func: eq(type, "entity")) {
@@ -1278,7 +1379,6 @@ async def get_knowledge_graph(
             res = txn.query(query)
             data = json.loads(res.json)
 
-            # Process entities
             for entity in data.get("entities", []):
                 nodes.append({
                     "id": entity["uid"],
@@ -1307,7 +1407,6 @@ async def get_knowledge_graph(
                             "weight": 1.0
                         })
 
-            # Process documents
             for doc in data.get("documents", []):
                 nodes.append({
                     "id": doc["uid"],

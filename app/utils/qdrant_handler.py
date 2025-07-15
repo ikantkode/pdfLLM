@@ -1,17 +1,22 @@
 import logging
 from typing import List, Dict, Any, Optional
 import uuid
+
 from qdrant_client import QdrantClient
+from qdrant_client.http import models
 from qdrant_client.http.models import PointStruct, Filter, FieldCondition, MatchValue
+
 from config import settings
 
 logger = logging.getLogger(__name__)
 
+
 class QdrantHandler:
-    def __init__(self, host: str, port: int, collection_name: str):
+    def __init__(self):
         try:
-            self.client = QdrantClient(host=host, port=port)
-            self.collection_name = collection_name
+            self.client = QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
+            self.collection_name = "pdfllm_collection"
+            self.vector_size = 1024
             self._initialize_collection()
         except Exception as e:
             logger.error(f"Failed to initialize Qdrant client: {str(e)}")
@@ -24,7 +29,10 @@ class QdrantHandler:
             if self.collection_name not in [c.name for c in collections.collections]:
                 self.client.create_collection(
                     collection_name=self.collection_name,
-                    vectors_config={"size": 1536, "distance": "Cosine"}
+                    vectors_config=models.VectorParams(
+                        size=self.vector_size,
+                        distance=models.Distance.COSINE
+                    )
                 )
                 logger.info(f"Created collection: {self.collection_name}")
 
@@ -56,16 +64,12 @@ class QdrantHandler:
         try:
             # Convert chunk_id to valid UUID format
             if "_" in chunk_id:
-                # If using fileid_chunkindex format, convert to UUID
                 base_uuid = chunk_id.split("_")[0]
                 try:
-                    # Try to use the base UUID portion
                     point_id = uuid.UUID(base_uuid)
                 except ValueError:
-                    # If not valid UUID, generate a new one from the string
                     point_id = uuid.uuid5(uuid.NAMESPACE_DNS, chunk_id)
             else:
-                # If already a UUID, use it directly
                 point_id = uuid.UUID(chunk_id)
 
             payload = {
@@ -78,7 +82,7 @@ class QdrantHandler:
                 collection_name=self.collection_name,
                 points=[
                     {
-                        "id": str(point_id),  # Ensure string representation of UUID
+                        "id": str(point_id),
                         "vector": embedding,
                         "payload": payload
                     }
