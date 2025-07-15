@@ -43,13 +43,13 @@ docker compose up -d --build
 ## Current Issues:
 
 - Larger PDFs might be troublesome to process due to limited context window.
-- My Ollama on a 3060 (12GB VRAM) can only run Q4 embedding and chat models, thus, the results are not as coherent so don't be surprised.
+- My Ollama on a 3060 (12GB VRAM) can only run Q4 embedding and chat models, thus, the results are not as clear (fonts may come funny) so don't be surprised.
 - Tests have only been conducted with single PDFs (upto 40 pages) - context limits are an issue. 
-- I dont know how to run evaluations on this rag app yet. :/ I am interested though.
+- I dont know how to run evaluations on this rag app yet.
 - See below for an issue due to my exhaustion.
     - Currently, you must update config.py in addition to the .env to propagate your settings (for example: if you change your model). 
 
- # OpenAI settings
+    # OpenAI settings
     openai_enabled: bool = Field(False, env="OPENAI_ENABLED")
     openai_api_key: str = Field("", env="OPENAI_API_KEY")
     openai_embedding_model: str = Field("text-embedding-3-small", env="OPENAI_EMBEDDING_MODEL")
