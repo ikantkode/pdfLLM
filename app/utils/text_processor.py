@@ -57,15 +57,21 @@ class TextProcessor:
         self.max_tokens = settings.max_embedding_tokens
 
     def clean_markdown(self, text: str) -> str:
-        """Clean markdown text by removing excessive whitespace and special characters"""
-        text = re.sub(r'[\n\r\t]', ' ', text)  # Replace newlines, tabs with spaces
-        text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces with single space
-        text = re.sub(r'#+', '#', text)   # Normalize headers
-        text = re.sub(r'(\w)\s+(\w)', r'\1\2', text)  # Fix spaced characters
-        text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)  # Fix spaced numbers
-        text = text.strip()
+        """More aggressive cleaning for RAG contexts"""
+        # Fix space-separated characters
+        text = re.sub(r'(\w)\s+(\w)\s+(\w)\s+(\w)', r'\1\2\3\4', text)
+        text = re.sub(r'(\w)\s+(\w)\s+(\w)', r'\1\2\3', text) 
+        text = re.sub(r'(\w)\s+(\w)', r'\1\2', text)
+        
+        # Fix numbers
+        text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)
+        text = re.sub(r'(\d)\s+(\d{3})\s+(\d{3})', r'\1,\2,\3', text)
+        
+        # Remove OCR artifacts
+        text = re.sub(r'[\x00-\x1F]', ' ', text)  # Control chars
+        text = re.sub(r'\s+', ' ', text).strip()
         return text
-
+    
     def chunk_text(self, text: str, max_tokens: int = None) -> List[Dict]:
         """Split text into chunks, preserving table structures, using tiktoken for accurate token counting"""
         max_tokens = max_tokens or self.max_tokens

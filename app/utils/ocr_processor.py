@@ -1,6 +1,7 @@
 import logging
 import base64
 import io
+import re
 from pathlib import Path
 from typing import List, Optional
 from PIL import Image
@@ -32,6 +33,13 @@ class OCRProcessor:
 
             for page_num, image in enumerate(images, start=1):
                 text = pytesseract.image_to_string(image, lang='eng')
+
+                # NEW: Fix OCR artifacts in raw text before further processing
+                text = re.sub(r'(\w)\s+(\w)\s+(\w)\s+(\w)', r'\1\2\3\4', text)  # 4-char words
+                text = re.sub(r'(\w)\s+(\w)\s+(\w)', r'\1\2\3', text)  # 3-char words
+                text = re.sub(r'(\w)\s+(\w)', r'\1\2', text)  # 2-char words
+                text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)  # Numbers
+
                 # Basic markdown formatting for pytesseract output
                 lines = text.split('\n')
                 formatted_lines = []

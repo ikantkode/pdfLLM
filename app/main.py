@@ -508,6 +508,7 @@ def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
     except Exception as e:
         logger.error(f"Embedding generation failed: {str(e)}")
         raise
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=4, max=10),
@@ -528,46 +529,25 @@ async def preprocess_ocr_text(text: str) -> str:
         try:
             prompt = (
                 f"Input Text:\n{chunk}\n\n"
-                "You are an intelligent document cleaner. The input text may contain OCR errors such as:\n"
-                "- Extra spaces between characters (e.g., 'D z i u b a', '5 0 . 4 3')\n"
-                "- Malformed numbers (e.g., '1 , 98 . 16', '$$50.43', '7,068.92Net5,079.50')\n"
-                "- Repeated words, misaligned formatting, or broken names (e.g., 'E r m i l o L o p e z')\n"
-                "- Incorrectly combined metadata (e.g., 'Aslam Baig \nDate' instead of separating name and date)\n"
-                "- Incomplete, gibberish, or disorganized text\n\n"
-                "Your tasks are:\n"
-                "1. **Reconstruct** the text into clear, grammatically correct, and logically structured content.\n"
-                "2. **Fix character spacing** in names, words, and numbers.\n"
-                "3. **Standardize numbers and currency** formatting (e.g., '1 , 98 . 16' → '$1,988.16'). Use a single `$` where needed.\n"
-                "4. **Rejoin broken names or words** (e.g., 'E r m i l o L o p e z' → 'Ermilo Lopez').\n"
-                "5. **Separate metadata** like 'Date' or 'Signature' from names (e.g., 'Aslam Baig \nDate' → 'Aslam Baig').\n"
-                "6. **Preserve markdown** formatting such as headings, lists, and tables. Ensure tables are well-aligned.\n"
-                "7. **If the input contains payroll-related information** (such as employee names, hours, pay rates, gross/net pay):\n"
-                "   - Extract the relevant data and structure it in a markdown table.\n"
-                "   - Columns should include: `Employee`, `Role`, `Hours`, `Rate`, `Gross Pay`, `Net Pay`.\n"
-                "   - Ensure Gross Pay = Hours × Rate, and Net Pay < Gross Pay. Make reasonable assumptions and note them if necessary.\n"
-                "8. **If the input is not payroll-related**, simply clean and format the content into readable markdown, preserving any headings, paragraphs, or lists.\n"
-                "9. **Remove noise or gibberish**, but preserve all meaningful data.\n"
-                "10. **Comment assumptions** using HTML comments (e.g., `<!-- Assumed currency as USD -->`).\n"
-                "11. **Return only the cleaned text in markdown format**.\n\n"
-                "Example Input (Payroll):\n"
-                "Z e n o v i i D z i u b a L a b o r e r 1 6 h o u r s 9 4 . 4 3 p e r h o u r 1 , 5 1 0 . 8 8 N e t 1 , 1 4 3 . 2 0\n"
-                "E r m i l o L o p e z L a b o r e r 8 h o u r s 9 4 . 4 3 p e r h o u r 7 5 5 . 4 4 N e t 6 0 8 . 6 5\n"
-                "Aslam Baig \nDate\n\n"
-                "Example Output (Payroll):\n"
-                "## Payroll Details\n"
-                "| Employee        | Role     | Hours | Rate             | Gross Pay | Net Pay  |\n"
-                "|-----------------|----------|-------|------------------|-----------|----------|\n"
-                "| Zenovii Dziuba  | Laborer  | 16    | $94.43 per hour  | $1,510.88 | $1,143.20|\n"
-                "| Ermilo Lopez    | Laborer  | 8     | $94.43 per hour  | $755.44   | $608.65  |\n"
-                "<!-- Assumed currency as USD -->\n"
-                "<!-- Signature: Aslam Baig, Date field ignored as metadata -->\n\n"
-                "Example Input (Non-payroll):\n"
-                "T h e   p r o j e c t   w a s   i n i t i a t e d   o n   0 5 . 0 6 . 2 0 2 3   a n d   i n v o l v e d   r e g u l a r   s a f e t y   i n s p e c t i o n s .\n"
-                "Aslam Baig \nDate\n"
-                "Example Output (Non-payroll):\n"
-                "The project was initiated on 05.06.2023 and involved regular safety inspections.\n"
-                "<!-- Signature: Aslam Baig, Date field ignored as metadata -->\n"
-            )
+                "You are a document cleaner. Remove all OCR artifacts first, then re-format the remainder.\n\n"
+                "Step-0 (MANDATORY): Collapse every space inside a token (words, names, numbers, currency, dates). "
+                "Example: ‘1 , 0 0 0 , 0 0 0’ → ‘1,000,000’, ‘A d d i t i o n a l’ → ‘Additional’. "
+                "Do not remove spaces that separate distinct tokens.\n\n"
+                "Steps 1-11:\n"
+                "1. Reconstruct the text into clear, grammatical, logically structured content.\n"
+                "2. Standardize numbers and currency (single ‘$’, commas for thousands, two decimals).\n"
+                "3. Rejoin broken names/words that remain after Step-0.\n"
+                "4. Separate metadata labels (Date, Signature, etc.) from the preceding name/value.\n"
+                "5. Preserve markdown headings, lists, and tables; ensure tables are well-aligned.\n"
+                "6. If payroll data (employee, role, hours, rate, gross/net pay) is present:\n"
+                "   - Render it in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay.\n"
+                "   - Validate: Gross Pay ≈ Hours × Rate, Net Pay < Gross Pay. Note any assumptions.\n"
+                "7. If not payroll-related, simply return clean markdown prose.\n"
+                "8. Remove gibberish or noise; keep all meaningful data.\n"
+                "9. Comment assumptions with <!-- ... -->.\n"
+                "10. Return only the cleaned markdown.\n"
+                "11. Stay under the token budget.\n"
+                    )
 
             if settings.openai_enabled:
                 response = client.chat.completions.create(
@@ -635,128 +615,38 @@ async def preprocess_ocr_text(text: str) -> str:
     return cleaned_text
 
 def clean_response(text: str) -> str:
-    """Clean the LLM response to fix residual OCR artifacts and table formatting"""
+    """Final cleanup of LLM output with aggressive number and formatting fixes"""
     logger.debug(f"Raw response before cleaning: {text[:500]}...")
 
-    text = re.sub(r'(\w)\s{2,}(\w)', r'\1 \2', text)
+    # Phase 1: Fix number ranges and currency (most critical first)
+    text = re.sub(r'(\d{1,3}(?:,\d{3})*)\s*\n\s*([a-zA-Z]+)\s*\n\s*(\d{1,3}(?:,\d{3})*)', r'\1 \2 \3', text)  # 1\nmillion\n3 → 1 million 3
+    text = re.sub(r'(\d+)\s*\n\s*([,.])\s*\n\s*(\d+)', r'\1\2\3', text)  # 1\n,\n000 → 1,000
+    text = re.sub(r'(\d+)\s*-\s*\n\s*(\d+)', r'\1-\2', text)  # 1-\n000 → 1-000
+    text = re.sub(r'\$\s*\n\s*(\d+)', r'$\1', text)  # $\n100 → $100
+
+    # Phase 2: Fix spaced-out words and numbers
+    text = re.sub(r'\b([A-Za-z])\s+([A-Za-z])\s+([A-Za-z])\s+([A-Za-z])\b', r'\1\2\3\4', text)
+    text = re.sub(r'\b([A-Za-z])\s+([A-Za-z])\s+([A-Za-z])\b', r'\1\2\3', text)
+    text = re.sub(r'\b([A-Za-z])\s+([A-Za-z])\b', r'\1\2', text)
     text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)
-    text = re.sub(r'(\w)\s+([.,:;])\s+(\w)', r'\1\2\3', text)
-    text = re.sub(r'\b(\w)\s+(\w)\s+(\w)\s+(\w)\b', r'\1\2\3\4', text)
-    text = re.sub(r'\${2,}', r'$', text)
+    text = re.sub(r'(\d)\s+([kKmMbB])\b', r'\1\2', text)
 
-    text = re.sub(r'(\d+\.\d{2})\s*N\s*e\s*t\s*(\d+\.\d{2})', r'Gross $\1, Net $\2', text, flags=re.IGNORECASE)
-    text = re.sub(r'(\d+\.\d{2})\s*p\s*e\s*r\s*h\s*o\s*u\s*r', r'$\1 per hour', text, flags=re.IGNORECASE)
+    # Phase 3: Clean up remaining artifacts
+    text = re.sub(r'(?<=\w)\n(?=\w)', ' ', text)  # Newlines between words
+    text = re.sub(r'(?<=\d)\n(?=\d)', '', text)   # Newlines between digits
+    text = re.sub(r'(?<=\$)\n(?=\d)', '', text)   # Newlines after $
+    text = re.sub(r'[ \t]{2,}', ' ', text)        # Multiple spaces
+    text = re.sub(r'\n{3,}', '\n\n', text)        # Multiple newlines
 
-    lines = text.split('\n')
-    cleaned_lines = []
-    in_table = False
-    table_lines = []
-    total_gross = 0.0
-    total_net = 0.0
-
-    for line in lines:
-        if line.strip().startswith('|') and not in_table:
-            in_table = True
-            table_lines = [line]
-        elif in_table and line.strip().startswith('|'):
-            table_lines.append(line)
-        elif in_table and not line.strip().startswith('|'):
-            in_table = False
-            cleaned_table = []
-            header = None
-            net_pay_values = []
-            for table_line in table_lines:
-                cells = [re.sub(r'(\w)\s{2,}(\w)', r'\1 \2', cell.strip()) for cell in table_line.split('|')]
-                cells = [re.sub(r'\${2,}', r'$', cell) for cell in cells]
-                if not header and "Employee" in cells:
-                    header = cells
-                    cleaned_table.append('|'.join(cells))
-                    continue
-                if header and len(cells) >= len(header):
-                    try:
-                        hours = float(cells[header.index('Hours')]) if 'Hours' in header else 0.0
-                        rate_str = cells[header.index('Rate')] if 'Rate' in header else ''
-                        gross_str = cells[header.index('Gross Pay')] if 'Gross Pay' in header else ''
-                        net_str = cells[header.index('Net Pay')] if 'Net Pay' in header else ''
-                        rate = float(re.search(r'\d+\.\d{2}', rate_str).group()) if rate_str and re.search(r'\d+\.\d{2}', rate_str) else 0.0
-                        gross = float(re.search(r'\d+\.\d{2}', gross_str).group()) if gross_str and re.search(r'\d+\.\d{2}', gross_str) else 0.0
-                        net = float(re.search(r'\d+\.\d{2}', net_str).group()) if net_str and re.search(r'\d+\.\d{2}', net_str) else 0.0
-                        expected_gross = hours * rate
-                        if abs(expected_gross - gross) > 0.01:
-                            logger.warning(f"Inconsistent gross pay: {gross} != {hours} × {rate} = {expected_gross}")
-                            gross = expected_gross
-                            cells[header.index('Gross Pay')] = f'${gross:.2f}'
-                        if net > gross:
-                            logger.warning(f"Net pay {net} exceeds gross pay {gross}, swapping values")
-                            cells[header.index('Net Pay')], cells[header.index('Gross Pay')] = cells[header.index('Gross Pay')], cells[header.index('Net Pay')]
-                            net, gross = gross, net
-                        total_gross += gross
-                        net_pay_values.append(net)
-                        total_net = sum(net_pay_values)
-                    except (ValueError, AttributeError) as e:
-                        logger.warning(f"Failed to validate table row: {cells}, error: {str(e)}")
-                    cleaned_table.append('|'.join(cells))
-            cleaned_lines.extend(cleaned_table)
-            cleaned_lines.append(line)
-        else:
-            cleaned_lines.append(line)
-
-    if in_table:
-        cleaned_table = []
-        header = None
-        net_pay_values = []
-        for table_line in table_lines:
-            cells = [re.sub(r'(\w)\s{2,}(\w)', r'\1 \2', cell.strip()) for cell in table_line.split('|')]
-            cells = [re.sub(r'\${2,}', r'$', cell) for cell in cells]
-            if not header and "Employee" in cells:
-                header = cells
-                cleaned_table.append('|'.join(cells))
-                continue
-            if header and len(cells) >= len(header):
-                try:
-                    hours = float(cells[header.index('Hours')]) if 'Hours' in header else 0.0
-                    rate_str = cells[header.index('Rate')] if 'Rate' in header else ''
-                    gross_str = cells[header.index('Gross Pay')] if 'Gross Pay' in header else ''
-                    net_str = cells[header.index('Net Pay')] if 'Net Pay' in header else ''
-                    rate = float(re.search(r'\d+\.\d{2}', rate_str).group()) if rate_str and re.search(r'\d+\.\d{2}', rate_str) else 0.0
-                    gross = float(re.search(r'\d+\.\d{2}', gross_str).group()) if gross_str and re.search(r'\d+\.\d{2}', gross_str) else 0.0
-                    net = float(re.search(r'\d+\.\d{2}', net_str).group()) if net_str and re.search(r'\d+\.\d{2}', net_str) else 0.0
-                    expected_gross = hours * rate
-                    if abs(expected_gross - gross) > 0.01:
-                        gross = expected_gross
-                        cells[header.index('Gross Pay')] = f'${gross:.2f}'
-                    if net > gross:
-                        cells[header.index('Net Pay')], cells[header.index('Gross Pay')] = cells[header.index('Gross Pay')], cells[header.index('Net Pay')]
-                        net, gross = gross, net
-                    total_gross += gross
-                    net_pay_values.append(net)
-                    total_net = sum(net_pay_values)
-                except (ValueError, AttributeError) as e:
-                    logger.warning(f"Failed to validate table row: {cells}, error: {str(e)}")
-            cleaned_table.append('|'.join(cells))
-        cleaned_lines.extend(cleaned_table)
-
-    text = '\n'.join(cleaned_lines)
-    text = re.sub(r'[ \t]+', ' ', text)
-    text = re.sub(r'\n[ \t]+', '\n', text)
-    text = re.sub(r'[ \t]+\n', '\n', text)
-    text = text.strip()
-
-    text = re.sub(r'G r o s s\s+P a y', 'Gross Pay', text)
-    text = re.sub(r'N e t\s+P a y', 'Net Pay', text)
-    text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)
-    text = re.sub(r'\${2,}', r'$', text)
-
-    if total_gross > 0 and total_net > 0:
-        text = re.sub(
-            r'Total expenditure:.*$',
-            f'Total expenditure: Gross Pay ${total_gross:.2f}, Net Pay ${total_net:.2f}',
-            text,
-            flags=re.MULTILINE
-        )
+    # Phase 4: Final formatting pass
+    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+    text = '\n\n'.join(
+        f"{p[0].upper()}{p[1:]}" if p and p[0].islower() else p
+        for p in paragraphs
+    )
 
     logger.debug(f"Cleaned response: {text[:500]}...")
-    return text
+    return text.strip()
 
 def format_search_results(results: List) -> List[SearchResult]:
     """Format search results for response"""
@@ -797,6 +687,31 @@ def rank_results(entity_results: List, vector_results: List, limit: int) -> List
         reverse=True
     )[:limit]
 
+def enforce_response_quality(text: str) -> str:
+    """Enforce consistent formatting and remove all artifacts"""
+    # Remove newlines within words/numbers
+    text = re.sub(r'(?<=\w)\n(?=\w)', '', text)
+    text = re.sub(r'(?<=\d)\n(?=\d)', '', text)
+    
+    # Fix spaced-out characters
+    text = re.sub(r'\b([A-Za-z])\s+([A-Za-z])\s+([A-Za-z])\s+([A-Za-z])\b', r'\1\2\3\4', text)
+    text = re.sub(r'\b([A-Za-z])\s+([A-Za-z])\s+([A-Za-z])\b', r'\1\2\3', text)
+    text = re.sub(r'\b([A-Za-z])\s+([A-Za-z])\b', r'\1\2', text)
+    
+    # Format numbers/currency
+    text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)
+    text = re.sub(r'\$\s+(\d)', r'$\1', text)
+    text = re.sub(r'(\d)\s+(\d{3})\s+(\d{3})', r'\1,\2,\3', text)
+    
+    # Ensure proper paragraph structure
+    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+    text = '\n\n'.join(
+        f"{p[0].upper()}{p[1:]}" if p else "" 
+        for p in paragraphs
+    )
+    
+    return text.strip()
+
 def clean_query(query: str) -> str:
     """Clean user query to handle OCR-like noise and payroll-specific formatting"""
     query = re.sub(r'[\n\r\t]', ' ', query).strip()
@@ -814,39 +729,30 @@ def clean_query(query: str) -> str:
     return query
 
 async def build_chat_context(results: List[SearchResult]) -> str:
-    """Build context from search results with token limits"""
-    context = ""
-    token_count = 0
+    """Build clean, pre-processed context with source tracking"""
+    context = []
     file_map = {f['file_id']: f['filename'] for f in state_manager.file_metadata}
-    seen_content = set()
-
+    
     for result in results:
-        content = result.content
-        cleaned_content = re.sub(r'[\n\r\t]', ' ', content).strip()
-        cleaned_content = re.sub(r'(\w)\s{2,}(\w)', r'\1 \2', cleaned_content)
-        cleaned_content = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', cleaned_content)
-        cleaned_content = re.sub(r'\${2,}', r'$', cleaned_content)
-        cleaned_content = re.sub(r'\s+', ' ', cleaned_content).strip()
-
-        if not cleaned_content or cleaned_content in seen_content:
-            logger.debug(f"Skipped content: {cleaned_content[:100]}...")
-            continue
-        seen_content.add(cleaned_content)
-
-        tokens = len(tokenizer.encode(cleaned_content))
-        if token_count + tokens > settings.max_completion_tokens * 0.8:
-            logger.debug(f"Context truncated at {token_count} tokens")
-            break
-
-        context += f"Document: {file_map.get(result.document_id, 'Unknown')}\n"
-        context += f"Section: {result.chunk_index}\n"
-        context += f"Entities: {', '.join(result.entities)}\n"
-        context += f"Relationships: {', '.join(['{} {} {}'.format(rel['subject'], rel['predicate'], rel['object']) for rel in result.relationships])}\n"
-        context += f"Content: {cleaned_content}\n\n"
-        token_count += tokens
-
-    logger.debug(f"Built context with {token_count} tokens: {context[:500]}...")
-    return context
+        # First pass: Clean basic formatting
+        content = re.sub(r'[\n\r\t]', ' ', result.content).strip()
+        content = re.sub(r'\s+', ' ', content)
+        
+        # Second pass: Fix number ranges and currency
+        content = re.sub(r'(\d+)\s*([,.])\s*(\d+)', r'\1\2\3', content)
+        content = re.sub(r'(\d+)\s*([a-zA-Z]+)\s*(\d+)', r'\1 \2 \3', content)
+        content = re.sub(r'\$\s*(\d+)', r'$\1', content)
+        
+        # Format with source metadata
+        context.append(
+            f"DOCUMENT: {file_map.get(result.document_id, 'Unknown')}\n"
+            f"SECTION: {result.chunk_index}\n"
+            f"CONTENT: {content}\n"
+            f"KEY_ENTITIES: {', '.join(result.entities) if result.entities else 'None'}"
+        )
+    
+    # Ensure we don't exceed token limits
+    return "\n\n---\n\n".join(context)[:7500]  # Conservative limit
 
 @retry(
     stop=stop_after_attempt(3),
@@ -854,70 +760,61 @@ async def build_chat_context(results: List[SearchResult]) -> str:
     reraise=True
 )
 def generate_coherent_response(query: str, context: str) -> str:
-    """Generate response with proper token management and assistant-like behavior"""
+    """Generate properly formatted response with strict content separation"""
     validate_provider_settings()
-    if settings.openai_enabled:
-        client = OpenAI(api_key=settings.openai_api_key)
-    else:
-        client = None  # We'll use requests for Ollama
-
-    prompt = (
-        f"Context:\n{context}\n\n"
-        f"Query: {query}\n\n"
-        "You are a professional personal assistant tasked with providing a clear, concise, and accurate response based solely on the provided context and query. "
-        "The context has been preprocessed to minimize OCR errors, but minor issues may remain (e.g., spaces between characters, malformed numbers). "
-        "Follow these instructions:\n"
-        "1. Structure the response in a well-organized manner with complete sentences and proper grammar.\n"
-        "2. Avoid repetition of words, phrases, or numbers unless necessary for clarity.\n"
-        "3. Format numerical values correctly, using a single '$' for currency (e.g., '$1,988.16', '$94.43 per hour').\n"
-        "4. Remove spaces between characters in words, names, or numbers (e.g., 'J o h n' → 'John', '5 0 . 4 3' → '50.43').\n"
-        "5. For tables, ensure proper markdown formatting with aligned columns and no spaces between characters (e.g., '| John Smith | Laborer | 16 | $94.43 per hour | $1,510.88 | $1,143.20 | PayrollReport_1.pdf (Section 0) |').\n"
-        "6. Include a 'Source' column in tables to cite document name and section number for each piece of information.\n"
-        "7. Include relevant entities or relationships only if they directly contribute to answering the query.\n"
-        "8. Do not speculate or include information not present in the context or query.\n"
-        "9. For queries asking to 'explain' or describe a document (e.g., 'what is this document about'), provide a narrative summary of its content, purpose, and key details, followed by a markdown table of payroll details with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay, Source.\n"
-        "10. Only include total expenditure (Gross Pay and Net Pay) if the query explicitly asks for it (e.g., contains 'total', 'expenditure', or 'spent').\n"
-        "11. Validate numerical consistency: ensure Gross Pay = Hours × Rate, and Net Pay < Gross Pay. Use context-provided rates (e.g., $94.43 per hour) if available.\n"
-        "12. Keep the response under {settings.max_completion_tokens} tokens.\n"
-        "13. If minor OCR errors remain, prioritize meaningful information and ignore jumbled characters or formatting errors.\n"
-        "14. If hours or rates are missing, estimate them using gross pay and typical rates from the context (e.g., $94.43 per hour), noting assumptions.\n"
-        "15. If the context or query is unclear, note limitations (e.g., 'Some details may be incomplete due to minor OCR errors').\n\n"
-        "Example response for 'What is this document about?':\n"
-        """The document 'PayrollReport_1.pdf' is a certified payroll report from XYZ Construction Ltd. for the Community School Project, managed by the City Education Authority and the Department of Education. This report provides detailed information on wages paid to employees for the week ending April 23, 2023. It includes information about the contractor, subcontractor, and employees, along with their roles, hours worked, hourly rates, and corresponding gross and net pay. The document is signed by Jane Doe, representing XYZ Construction Ltd., and provides the company's address and taxpayer ID. The project is identified by Project ID 23-01234, and the school address is 1234 Main Street, Cityville, NY 10458. Below is a summary of the payroll details:
-
-| Employee | Role | Hours | Rate | Gross Pay | Net Pay | Source |
-|----------|------|-------|------|-----------|---------|--------|
-| John Smith | Laborer | 16 | $94.43 per hour | $1,510.88 | $1,143.20 | PayrollReport_1.pdf (Section 0) |
-| Michael Brown | Laborer | 8 | $94.43 per hour | $755.44 | $608.65 | PayrollReport_1.pdf (Section 0) |
-
-<!-- Assumed currency as USD based on context -->"""
-    )
+    
+    # Initialize client based on provider
     try:
         if settings.openai_enabled:
+            client = OpenAI(api_key=settings.openai_api_key)
+        else:
+            client = None  # For Ollama, we'll use requests directly
+    except Exception as e:
+        logger.error(f"Failed to initialize client: {str(e)}")
+        raise HTTPException(status_code=500, detail="Service configuration error")
+
+    system_prompt = """You are a professional document analyst. STRICTLY follow these rules:
+
+        1. CONTENT RULES:
+        - Never copy text verbatim from documents
+        - Always reformat numbers as continuous strings (e.g., $1,000,000-$3,000,000)
+        - Never put numbers/currency on separate lines
+
+        2. FORMATTING RULES:
+        - Replace all newlines between numbers with hyphens
+        - Remove spaces in currency values ($1M not $ 1 M)
+        - Ensure ranges use proper format (X-Y not X newline Y)
+
+        3. OUTPUT STRUCTURE:
+        1. Overview paragraph
+        2. Bullet points (max 5)
+        3. Source reference"""
+
+    user_prompt = f"""DOCUMENT CONTEXT:
+{context}
+
+USER QUESTION:
+{query}
+
+RESPONSE REQUIREMENTS:
+1. Start with "This document discusses..." 
+2. Include 3-5 key points as bullet points
+3. Format all numbers/currency properly
+4. End with "Source: [filename], section [X]" if available"""
+
+    try:
+        if settings.openai_enabled:
+            if not client:
+                raise ValueError("OpenAI client not initialized")
             response = client.chat.completions.create(
                 model=settings.openai_chat_model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a professional personal assistant. Provide clear, concise, and accurate responses based strictly on the provided context and query. "
-                            "The context has been preprocessed to minimize OCR errors, but minor issues may remain. "
-                            "Structure responses with complete sentences, proper grammar, and correct spelling. "
-                            "Remove spaces between characters in words, names, or numbers (e.g., 'J o h n' → 'John', '5 0 . 4 3' → '50.43'). "
-                            "Format numbers correctly, using a single '$' for currency (e.g., '$1,988.16', '$94.43 per hour'). "
-                            "For payroll-related queries, present details in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay, Source. "
-                            "Validate numerical consistency: Gross Pay = Hours × Rate, Net Pay < Gross Pay. Use context-provided rates (e.g., $94.43 per hour) if available. "
-                            "Only include total expenditure if explicitly requested in the query (e.g., 'total', 'expenditure', 'spent'). "
-                            "Estimate missing hours or rates using context data, noting assumptions. "
-                            "Do not speculate or add information beyond the context or query. "
-                            "Note limitations due to minor OCR errs if applicable."
-                        )
-                    },
-                    {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=settings.max_completion_tokens,
-                    temperature=0.3
-                )
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=settings.max_completion_tokens,
+                temperature=0.3
+            )
             response_text = response.choices[0].message.content.strip()
         else:
             response = requests.post(
@@ -925,37 +822,28 @@ def generate_coherent_response(query: str, context: str) -> str:
                 json={
                     "model": settings.ollama_chat_model,
                     "messages": [
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a professional personal assistant. Provide clear, concise, and accurate responses based strictly on the provided context and query. "
-                                "The context has been preprocessed to minimize OCR errors, but minor issues may remain. "
-                                "Structure responses with complete sentences, proper grammar, and correct spelling. "
-                                "Remove spaces between characters in words, names, or numbers (e.g., 'J o h n' → 'John', '5 0 . 4 3' → '50.43'). "
-                                "Format numbers correctly, using a single '$' for currency (e.g., '$1,988.16', '$94.43 per hour'). "
-                                "For payroll-related queries, present details in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay, Source. "
-                                "Validate numerical consistency: Gross Pay = Hours × Rate, Net Pay < Gross Pay. Use context-provided rates (e.g., $94.43 per hour) if available. "
-                                "Only include total expenditure if explicitly requested in the query (e.g., 'total', 'expenditure', 'spent'). "
-                                "Estimate missing hours or rates using context data, noting assumptions. "
-                                "Do not speculate or add information beyond the context or query. "
-                                "Note limitations due to minor OCR errs if applicable."
-                            )
-                        },
-                        {"role": "user", "content": prompt}
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
                     ],
                     "max_tokens": settings.max_completion_tokens,
                     "temperature": 0.3
-                }
+                },
+                timeout=30  # Added timeout
             )
             response.raise_for_status()
             response_text = response.json()["choices"][0]["message"]["content"].strip()
-        response_text = clean_response(response_text)
-        logger.debug(f"Generated response: {response_text[:500]}...")
-        return response_text
+        
+        return enforce_response_quality(response_text)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API request failed: {str(e)}")
+        raise HTTPException(status_code=502, detail="Service temporarily unavailable")
+    except ValueError as e:
+        logger.error(f"Configuration error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Service configuration error")
     except Exception as e:
-        logger.error(f"Failed to generate response: {str(e)}")
-        raise
-
+        logger.error(f"Unexpected error in response generation: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to generate response")
+    
 # Exception handlers
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -1171,30 +1059,27 @@ async def chat_with_documents(
     chat_id: Optional[str] = Form(None),
     api_key: str = Depends(validate_api_key)
 ):
-    """Chat with document context"""
-    validate_provider_settings()
+    """Chat endpoint with enforced response quality"""
     try:
         cleaned_query = clean_query(query)
-        logger.debug(f"Original query: {query}")
-        logger.debug(f"Cleaned query for chat: {cleaned_query}")
-
         search_results = await search_documents(
             query=cleaned_query,
             user_id=user_id,
             file_ids=file_ids,
-            limit=10,
+            limit=5,  # Fewer but more relevant results
             use_graph=True
         )
 
         if not search_results["results"]:
             return {
-                "response": "No relevant information found in documents.",
+                "response": "No relevant information found in the documents.",
                 "chat_id": chat_id or str(uuid.uuid4()),
                 "sources": []
             }
 
         context = await build_chat_context(search_results["results"])
         response = generate_coherent_response(cleaned_query, context)
+        response = enforce_response_quality(response)
 
         chat_id = chat_id or str(uuid.uuid4())
         if chat_id not in state_manager.chat_sessions:
