@@ -94,6 +94,8 @@ docker compose up -d --build
     ollama_port: int = Field(11434, env="OLLAMA_PORT")
     ollama_embedding_model: str = Field("bge-m3:latest", env="OLLAMA_EMBEDDING_MODEL")
     ollama_chat_model: str = Field("llama3.1:8b", env="OLLAMA_CHAT_MODEL")
+- Current state of the app is technically limited to "single system prompt" for retrieval. This means you must adjust the prompt to cater to your needs, otherwise the reponse is conjoined text/funny text. The retrieval is still accurate.
+- Solution to the above mentioned problems are being implemented into a new pdfLLM app iteration. The reason for this is because this one "works" for in house playing for specific fields. The new iteration is called "multi-pdfLLM" which will include A LOT of things I have already started working on.
 
 ## Roadmap
 
@@ -101,8 +103,8 @@ docker compose up -d --build
 - ✅ Graph-enhanced search results
 - ✅ Replace networkx with dgraph
 - ✅ Ollama / Local LLM support
-- 🔜 JWT authentication
-- 🔜 Dynamic embedding/chat model selection (OpenAI, DeepSeek, Grok)
+- 🔜 JWT authentication (no plans to implement it into base-pdfLLM)
+- 🔜 Dynamic embedding/chat model selection (OpenAI, DeepSeek, Grok) (no plans to implement in base-pdfLLM)
 
 ## License
 
