@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 # Constants
 STATE_FILE = Path(settings.data_dir) / "streamlit_state.json"
-FASTAPI_HOST = "rag-service"  # Use Docker service name for internal communication
-FASTAPI_PORT = "8000"  # FastAPI service port
+FASTAPI_HOST = "rag-service"
+FASTAPI_PORT = "8000"
 
 class SessionState:
     """Manage Streamlit session state with persistence"""
@@ -49,7 +49,6 @@ class SessionState:
             st.session_state.selected_docs = []
         if "upload_key" not in st.session_state:
             st.session_state.upload_key = 0
-
         self.load()
 
     def save(self):
@@ -84,6 +83,28 @@ class SessionState:
 
 session_state = SessionState()
 
+def update_selected_docs():
+    """Update selected documents based on checkbox states"""
+    selected = []
+    for file in st.session_state.file_metadata:
+        checkbox_key = f"doc_select_{file['file_id']}"
+        if st.session_state.get(checkbox_key, False):
+            selected.append(file['file_id'])
+    st.session_state.selected_docs = selected
+    session_state.save()
+
+def handle_select_all():
+    """Select all documents checkbox handler"""
+    for file in st.session_state.file_metadata:
+        st.session_state[f"doc_select_{file['file_id']}"] = True
+    update_selected_docs()
+
+def handle_clear_all():
+    """Clear all documents checkbox handler"""
+    for file in st.session_state.file_metadata:
+        st.session_state[f"doc_select_{file['file_id']}"] = False
+    update_selected_docs()
+
 def create_new_chat():
     """Create a new chat session"""
     chat_id = str(uuid.uuid4())
@@ -93,7 +114,7 @@ def create_new_chat():
         "messages": [],
         "created_at": datetime.datetime.now().isoformat(),
         "updated_at": datetime.datetime.now().isoformat(),
-        "document_ids": []
+        "document_ids": st.session_state.selected_docs.copy()
     }
     st.session_state.current_chat_id = chat_id
     session_state.save()
@@ -109,32 +130,20 @@ def delete_chat(chat_id: str):
     st.rerun()
 
 def get_file_preview_url(filename: str) -> Optional[str]:
-    """Generate a URL for file preview using the /preview endpoint with filename"""
+    """Generate a URL for file preview"""
     file_meta = next(
         (f for f in st.session_state.file_metadata if f['filename'] == filename),
         None
     )
     if not file_meta:
-        logger.error(f"No file metadata found for filename: {filename}")
         return None
     file_id = file_meta['file_id']
-    preview_url = f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/preview/{file_id}?user_id={file_meta['user_id']}&X-API-Key={settings.openai_api_key}"
-    logger.debug(f"Generated preview URL: {preview_url}")
-    return preview_url
-
-def update_selected_docs(file_id: str):
-    """Callback for document selection checkboxes"""
-    if file_id in st.session_state.selected_docs:
-        st.session_state.selected_docs.remove(file_id)
-    else:
-        st.session_state.selected_docs.append(file_id)
-    session_state.save()
+    return f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/preview/{file_id}?user_id={file_meta['user_id']}&X-API-Key={settings.openai_api_key}"
 
 def render_document_management(user_id: str):
     """Render the document management sidebar"""
     st.sidebar.title("Document Management")
 
-    # File upload section
     with st.sidebar.expander("Upload Documents", expanded=True):
         uploaded_files = st.file_uploader(
             "Upload files",
@@ -156,7 +165,7 @@ def render_document_management(user_id: str):
             with st.spinner("Processing files..."):
                 for uploaded_file in uploaded_files:
                     if uploaded_file.size > settings.max_document_size:
-                        error_messages.append(f"File {uploaded_file.name} exceeds {settings.max_document_size//(1024*1024)}MB limit")
+                        error_messages.append(f"File {uploaded_file.name} exceeds size limit")
                         continue
 
                     files = {"file": (uploaded_file.name, uploaded_file, uploaded_file.type)}
@@ -180,14 +189,13 @@ def render_document_management(user_id: str):
                                 "user_id": user_id
                             })
                             success_count += 1
-                            logger.info(f"Uploaded file: {uploaded_file.name}")
                         else:
-                            error_messages.append(f"Upload failed for {uploaded_file.name}: {response.json().get('detail', 'Unknown error')}")
+                            error_messages.append(f"Upload failed for {uploaded_file.name}")
                     except Exception as e:
-                        error_messages.append(f"Upload error for {uploaded_file.name}: {str(e)}")
+                        error_messages.append(f"Upload error: {str(e)}")
 
             if success_count > 0:
-                st.success(f"Successfully uploaded {success_count} file(s)!")
+                st.success(f"Uploaded {success_count} file(s)")
                 st.session_state.upload_key += 1
                 session_state.save()
                 st.rerun()
@@ -196,7 +204,6 @@ def render_document_management(user_id: str):
                     st.error(error)
             st.session_state.upload_trigger = False
 
-    # Document list
     st.sidebar.markdown("### Uploaded Documents")
     try:
         with st.spinner("Loading documents..."):
@@ -215,7 +222,6 @@ def render_document_management(user_id: str):
                             st.write(f"**{file['filename']}**")
                             st.caption(f"{file['file_type']} - {file['upload_date']} - {file['size']/1024:.1f} KB")
 
-                        # Preview button
                         with cols[1]:
                             preview_url = get_file_preview_url(file['filename'])
                             if preview_url:
@@ -223,17 +229,13 @@ def render_document_management(user_id: str):
                                     f'<a href="/preview/{file["filename"]}" target="_blank" style="text-decoration: none;">🔍</a>',
                                     unsafe_allow_html=True
                                 )
-                            else:
-                                st.markdown("🔍", unsafe_allow_html=True)
 
-                        # Debug button
                         with cols[2]:
                             st.markdown(
                                 f'<a href="?page=debug&file_id={file["file_id"]}" target="_self" style="text-decoration: none;">🐞</a>',
                                 unsafe_allow_html=True
                             )
 
-                        # Delete button
                         with cols[3]:
                             if st.button("🗑️", key=f"delete_{file['file_id']}"):
                                 try:
@@ -250,16 +252,11 @@ def render_document_management(user_id: str):
                                         if file['file_id'] in st.session_state.selected_docs:
                                             st.session_state.selected_docs.remove(file['file_id'])
                                         session_state.save()
-                                        logger.info(f"Deleted document: {file['filename']}")
                                         st.rerun()
-                                    else:
-                                        st.error(f"Delete failed: {response.json().get('detail', 'Unknown error')}")
                                 except Exception as e:
                                     st.error(f"Delete error: {str(e)}")
             else:
                 st.sidebar.info("No documents uploaded yet.")
-        else:
-            st.sidebar.error(f"Failed to load documents: {response.json().get('detail', 'Unknown error')}")
     except Exception as e:
         st.sidebar.error(f"Error loading documents: {str(e)}")
 
@@ -282,6 +279,7 @@ def render_chat_sessions(user_id: str):
                 use_container_width=True
             ):
                 st.session_state.current_chat_id = chat_id
+                st.session_state.selected_docs = chat_data['document_ids'].copy()
                 st.rerun()
         with cols[1]:
             if st.button(
@@ -290,25 +288,44 @@ def render_chat_sessions(user_id: str):
                 on_click=delete_chat,
                 args=(chat_id,)
             ):
-                st.rerun()
+                pass
 
 def render_chat_interface(user_id: str):
     """Render the main chat interface"""
     st.title("RAG Chat Interface")
 
-    # Document selection for context
+    # Document selection
     if st.session_state.file_metadata:
         st.markdown("### Select Documents for Context")
-        cols = st.columns(3)
-        for i, file in enumerate(st.session_state.file_metadata):
-            if file.get("user_id") == user_id:
-                with cols[i % 3]:
+        
+        # Initialize selected_docs if not exists
+        if 'selected_docs' not in st.session_state:
+            st.session_state.selected_docs = []
+        
+        # Select All/Clear All buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Select All", on_click=handle_select_all):
+                pass
+        with col2:
+            if st.button("Clear All", on_click=handle_clear_all):
+                pass
+        
+        st.markdown(f"**Selected Documents**: {len(st.session_state.selected_docs)}")
+        
+        # Display checkboxes in a scrollable container
+        with st.container(height=200):
+            for file in st.session_state.file_metadata:
+                if file.get("user_id") == user_id:
+                    checkbox_key = f"doc_select_{file['file_id']}"
+                    if checkbox_key not in st.session_state:
+                        st.session_state[checkbox_key] = file['file_id'] in st.session_state.selected_docs
+                    
                     st.checkbox(
                         file['filename'],
-                        key=f"doc_select_{file['file_id']}",
-                        value=file['file_id'] in st.session_state.selected_docs,
-                        on_change=update_selected_docs,
-                        args=(file['file_id'],)
+                        value=st.session_state[checkbox_key],
+                        key=checkbox_key,
+                        on_change=update_selected_docs
                     )
 
     # Chat input
@@ -316,33 +333,30 @@ def render_chat_interface(user_id: str):
     query = st.text_area("Enter your query", height=100, key="query_input")
 
     if st.button("Send", key="send_button"):
-        if not query or not user_id or not st.session_state.selected_docs:
-            if not query and not st.session_state.selected_docs:
-                st.error("Please enter a query and select at least one document.")
-            elif not query:
-                st.error("Please enter a query.")
-            elif not st.session_state.selected_docs:
-                st.error("Please select at least one document.")
+        if not query or not user_id:
+            st.error("Please enter a query.")
+        elif not st.session_state.selected_docs:
+            st.error("Please select at least one document.")
         else:
             with st.spinner("Processing query..."):
-                logger.debug(f"Sending query with file_ids: {st.session_state.selected_docs}")
                 try:
-                    payload = {
+                    # Send query to chat endpoint
+                    chat_payload = {
                         "query": query,
                         "user_id": user_id,
                         "file_ids": st.session_state.selected_docs,
                         "chat_id": st.session_state.current_chat_id
                     }
-                    response = requests.post(
+                    chat_response = requests.post(
                         f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/chat",
-                        data=payload,
+                        data=chat_payload,
                         headers={"X-API-Key": settings.openai_api_key}
                     )
-
-                    if response.status_code == 200:
-                        result = response.json()
+                    
+                    if chat_response.status_code == 200:
+                        result = chat_response.json()
                         answer = clean_response(result["response"])
-
+                        
                         # Update chat history
                         current_chat = st.session_state.chat_sessions.get(st.session_state.current_chat_id, {})
                         if current_chat:
@@ -357,7 +371,7 @@ def render_chat_interface(user_id: str):
                                 "timestamp": datetime.datetime.now().isoformat()
                             })
                             current_chat['updated_at'] = datetime.datetime.now().isoformat()
-                            current_chat['document_ids'] = st.session_state.selected_docs
+                            current_chat['document_ids'] = st.session_state.selected_docs.copy()
                             session_state.save()
 
                         # Display response
@@ -366,10 +380,14 @@ def render_chat_interface(user_id: str):
 
                         if result.get("sources"):
                             st.subheader("Sources")
+                            unique_sources = {}
                             for source in result["sources"]:
+                                if source['document_id'] not in unique_sources:
+                                    unique_sources[source['document_id']] = source
+                            for source in unique_sources.values():
                                 st.write(f"- **{source['filename']}** (Section {source['chunk_index']})")
                     else:
-                        st.error(f"Chat failed: {response.json().get('detail', 'Unknown error')}")
+                        st.error(f"Chat error: {chat_response.text}")
                 except Exception as e:
                     st.error(f"Chat error: {str(e)}")
 
@@ -392,15 +410,13 @@ def clean_response(text: str) -> str:
     return text
 
 def render_knowledge_graph(user_id: str, file_id: Optional[str] = None):
-    """Render the knowledge graph visualization using pyvis"""
-    logger.info(f"Rendering knowledge graph for user_id={user_id}, file_id={file_id}")
+    """Render the knowledge graph visualization"""
     st.markdown("### Knowledge Graph")
     try:
         with st.spinner("Loading knowledge graph..."):
             url = f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/knowledge_graph?user_id={user_id}"
             if file_id:
                 url += f"&file_id={file_id}"
-            logger.debug(f"Requesting knowledge graph from: {url}")
             response = requests.get(
                 url,
                 headers={"X-API-Key": settings.openai_api_key}
@@ -408,10 +424,10 @@ def render_knowledge_graph(user_id: str, file_id: Optional[str] = None):
 
         if response.status_code == 200:
             graph_data = response.json()
-            logger.debug(f"Graph data received: {json.dumps(graph_data, indent=2)}")
             if not graph_data["nodes"]:
-                st.warning("No knowledge graph data available for this user or document.")
+                st.warning("No knowledge graph data available")
                 return
+            
             net = Network(height="600px", width="100%", directed=True, notebook=True)
             for node in graph_data["nodes"]:
                 net.add_node(
@@ -422,25 +438,18 @@ def render_knowledge_graph(user_id: str, file_id: Optional[str] = None):
             for edge in graph_data["edges"]:
                 net.add_edge(edge["from"], edge["to"], title=edge["label"])
 
-            # Save to temporary HTML file
             temp_file = f"/tmp/knowledge_graph_{user_id}_{file_id if file_id else 'all'}.html"
-            logger.debug(f"Saving graph to: {temp_file}")
             net.write_html(temp_file)
             with open(temp_file, "r") as f:
                 html_content = f.read()
             components.html(html_content, height=600)
-        else:
-            st.error(f"Failed to load knowledge graph: {response.json().get('detail', 'Unknown error')}")
     except Exception as e:
-        logger.error(f"Error loading knowledge graph: {str(e)}")
         st.error(f"Error loading knowledge graph: {str(e)}")
 
 def render_debug_page():
     """Render the debug page for a specific file"""
     file_id = st.query_params.get("file_id", [None])[0]
-    logger.info(f"Rendering debug page for file_id={file_id}, query_params={st.query_params}")
     if not file_id:
-        logger.error("No file_id provided in query parameters")
         st.error("No File ID provided")
         st.button("Back to Main", on_click=lambda: st.query_params.update(page="main"))
         return
@@ -451,13 +460,12 @@ def render_debug_page():
     )
 
     if not file_meta:
-        logger.error(f"File ID {file_id} not found in session state")
-        st.error("File not found in session state")
+        st.error("File not found")
         st.button("Back to Main", on_click=lambda: st.query_params.update(page="main"))
         return
 
-    st.title(f"Debug: File ID {file_id[:8]}...")
-    # File metadata section
+    st.title(f"Debug: {file_meta['filename']}")
+    
     st.markdown("### File Metadata")
     cols = st.columns(2)
     with cols[0]:
@@ -467,7 +475,6 @@ def render_debug_page():
         st.metric("Upload Date", file_meta['upload_date'])
         st.metric("Size", f"{file_meta['size'] / 1024:.1f} KB")
 
-    # Content preview section
     with st.expander("Content Preview"):
         if file_meta.get('markdown_content'):
             st.text_area(
@@ -476,10 +483,7 @@ def render_debug_page():
                 height=300,
                 disabled=True
             )
-        else:
-            st.warning("No content preview available")
 
-    # Vector database chunks section
     st.markdown("### Vector Database Chunks")
     try:
         with st.spinner("Querying vector database..."):
@@ -502,33 +506,22 @@ def render_debug_page():
                     with st.expander(f"Chunk {point['chunk_index']}"):
                         st.json({
                             "id": point['chunk_id'],
-                            "user_id": file_meta['user_id'],
-                            "document_id": point['document_id'],
-                            "parent_section": point['parent_section'],
-                            "content_preview": f"{point['content'][:200]}..." if point['content'] else "Empty",
+                            "content_preview": f"{point['content'][:200]}...",
                             "entities": point['entities'],
                             "relationships": point['relationships'],
                             "score": point['score']
                         })
-            else:
-                st.warning("No chunks found in vector database for this file")
-        else:
-            st.error(f"Failed to query chunks: {response.json().get('detail', 'Unknown error')}")
     except Exception as e:
-        logger.error(f"Search query failed for file_id {file_id}: {str(e)}")
         st.error(f"Failed to query chunks: {str(e)}")
 
-    # Knowledge graph visualization section
     render_knowledge_graph(file_meta['user_id'], file_id)
-
     st.button("Back to Main", on_click=lambda: st.query_params.update(page="main"))
 
 def render_main_page():
     """Render the main application page"""
     st.title("RAG Microservice Interface")
-    st.warning("Note: Hard reloading (Ctrl+F5) will clear in-memory state, but documents and chats will reload from disk.")
+    st.warning("Note: Hard reloading (Ctrl+F5) will clear in-memory state")
 
-    # Get user ID
     user_id = st.text_input(
         "Enter User ID",
         value="default_user",
@@ -537,11 +530,9 @@ def render_main_page():
     if user_id:
         st.session_state.user_id = user_id
 
-    # Render sidebars
     render_document_management(user_id)
     render_chat_sessions(user_id)
 
-    # Render appropriate main content
     if st.session_state.current_chat_id:
         render_chat_interface(user_id)
     else:
@@ -549,7 +540,6 @@ def render_main_page():
 
 # Router
 page = st.query_params.get("page", ["main"])[0]
-logger.info(f"Query parameter 'page': {page}, full query params: {st.query_params}")
 if page == "main":
     render_main_page()
 elif page == "debug":

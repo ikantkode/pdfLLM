@@ -485,7 +485,7 @@ def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
             response = client.embeddings.create(
                 input=texts,
                 model=settings.openai_embedding_model,
-                dimensions=1024  # Truncate to 1024 dimensions
+                dimensions=1024
             )
             embeddings = [item.embedding for item in response.data]
             logger.info(f"OpenAI embeddings generated with {len(embeddings[0])} dimensions")
@@ -497,7 +497,7 @@ def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
                     f"http://{settings.ollama_host}:{settings.ollama_port}/api/embeddings",
                     json={
                         "model": settings.ollama_embedding_model,
-                        "prompt": text  # Send single string
+                        "prompt": text
                     }
                 )
                 response.raise_for_status()
@@ -523,7 +523,7 @@ async def preprocess_ocr_text(text: str) -> str:
     if settings.openai_enabled:
         client = OpenAI(api_key=settings.openai_api_key)
     else:
-        client = None  # We'll use requests for Ollama
+        client = None
 
     for chunk in chunks:
         try:
@@ -547,7 +547,7 @@ async def preprocess_ocr_text(text: str) -> str:
                 "9. Comment assumptions with <!-- ... -->.\n"
                 "10. Return only the cleaned markdown.\n"
                 "11. Stay under the token budget.\n"
-                    )
+            )
 
             if settings.openai_enabled:
                 response = client.chat.completions.create(
@@ -619,10 +619,10 @@ def clean_response(text: str) -> str:
     logger.debug(f"Raw response before cleaning: {text[:500]}...")
 
     # Phase 1: Fix number ranges and currency (most critical first)
-    text = re.sub(r'(\d{1,3}(?:,\d{3})*)\s*\n\s*([a-zA-Z]+)\s*\n\s*(\d{1,3}(?:,\d{3})*)', r'\1 \2 \3', text)  # 1\nmillion\n3 → 1 million 3
-    text = re.sub(r'(\d+)\s*\n\s*([,.])\s*\n\s*(\d+)', r'\1\2\3', text)  # 1\n,\n000 → 1,000
-    text = re.sub(r'(\d+)\s*-\s*\n\s*(\d+)', r'\1-\2', text)  # 1-\n000 → 1-000
-    text = re.sub(r'\$\s*\n\s*(\d+)', r'$\1', text)  # $\n100 → $100
+    text = re.sub(r'(\d{1,3}(?:,\d{3})*)\s*\n\s*([a-zA-Z]+)\s*\n\s*(\d{1,3}(?:,\d{3})*)', r'\1 \2 \3', text)
+    text = re.sub(r'(\d+)\s*\n\s*([,.])\s*\n\s*(\d+)', r'\1\2\3', text)
+    text = re.sub(r'(\d+)\s*-\s*\n\s*(\d+)', r'\1-\2', text)
+    text = re.sub(r'\$\s*\n\s*(\d+)', r'$\1', text)
 
     # Phase 2: Fix spaced-out words and numbers
     text = re.sub(r'\b([A-Za-z])\s+([A-Za-z])\s+([A-Za-z])\s+([A-Za-z])\b', r'\1\2\3\4', text)
@@ -632,11 +632,11 @@ def clean_response(text: str) -> str:
     text = re.sub(r'(\d)\s+([kKmMbB])\b', r'\1\2', text)
 
     # Phase 3: Clean up remaining artifacts
-    text = re.sub(r'(?<=\w)\n(?=\w)', ' ', text)  # Newlines between words
-    text = re.sub(r'(?<=\d)\n(?=\d)', '', text)   # Newlines between digits
-    text = re.sub(r'(?<=\$)\n(?=\d)', '', text)   # Newlines after $
-    text = re.sub(r'[ \t]{2,}', ' ', text)        # Multiple spaces
-    text = re.sub(r'\n{3,}', '\n\n', text)        # Multiple newlines
+    text = re.sub(r'(?<=\w)\n(?=\w)', ' ', text)
+    text = re.sub(r'(?<=\d)\n(?=\d)', '', text)
+    text = re.sub(r'(?<=\$)\n(?=\d)', '', text)
+    text = re.sub(r'[ \t]{2,}', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
 
     # Phase 4: Final formatting pass
     paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
@@ -666,10 +666,11 @@ def format_search_results(results: List) -> List[SearchResult]:
         for r in results
     ]
 
-def rank_results(entity_results: List, vector_results: List, limit: int) -> List:
-    """Combine and rank results from different retrieval methods"""
+def rank_results(entity_results: List, vector_results: List, limit: int, file_ids: Optional[List[str]] = None) -> List:
+    """Combine and rank results from different retrieval methods with document diversity"""
     seen = set()
     combined = []
+    doc_counts = {}  # Track number of results per document
 
     for result in entity_results + vector_results:
         result_id = result.id if hasattr(result, 'id') else result.get('chunk_id')
@@ -678,38 +679,51 @@ def rank_results(entity_results: List, vector_results: List, limit: int) -> List
             score = (result.score if hasattr(result, 'score') else result.get('score', 0.0))
             score += 0.1 * len(result.payload.get('entities', []))
             score += 0.2 * len(result.payload.get('relationships', []))
+            document_id = result.payload.get('document_id', 'N/A')
+            # Boost score for documents with fewer results to promote diversity
+            if file_ids and document_id in file_ids:
+                doc_counts[document_id] = doc_counts.get(document_id, 0) + 1
+                score += 1.0 / (doc_counts[document_id] + 1)  # Inverse frequency boost
             result.score = score
             combined.append(result)
 
-    return sorted(
+    # Ensure at least one result per document if possible
+    sorted_results = sorted(
         combined,
         key=lambda x: x.score if hasattr(x, 'score') else x.get('score', 0.0),
         reverse=True
-    )[:limit]
+    )
+    if file_ids:
+        final_results = []
+        seen_docs = set()
+        # First, add one result per document
+        for result in sorted_results:
+            doc_id = result.payload.get('document_id', 'N/A')
+            if doc_id in file_ids and doc_id not in seen_docs:
+                final_results.append(result)
+                seen_docs.add(doc_id)
+        # Then, fill remaining slots with highest-scored results
+        remaining = [r for r in sorted_results if r not in final_results]
+        final_results.extend(remaining[:limit - len(final_results)])
+        return final_results[:limit]
+    return sorted_results[:limit]
 
 def enforce_response_quality(text: str) -> str:
     """Enforce consistent formatting and remove all artifacts"""
-    # Remove newlines within words/numbers
     text = re.sub(r'(?<=\w)\n(?=\w)', '', text)
     text = re.sub(r'(?<=\d)\n(?=\d)', '', text)
-    
-    # Fix spaced-out characters
+    text = re.sub(r'(?<=\$)\n(?=\d)', '', text)
     text = re.sub(r'\b([A-Za-z])\s+([A-Za-z])\s+([A-Za-z])\s+([A-Za-z])\b', r'\1\2\3\4', text)
     text = re.sub(r'\b([A-Za-z])\s+([A-Za-z])\s+([A-Za-z])\b', r'\1\2\3', text)
     text = re.sub(r'\b([A-Za-z])\s+([A-Za-z])\b', r'\1\2', text)
-    
-    # Format numbers/currency
     text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)
     text = re.sub(r'\$\s+(\d)', r'$\1', text)
     text = re.sub(r'(\d)\s+(\d{3})\s+(\d{3})', r'\1,\2,\3', text)
-    
-    # Ensure proper paragraph structure
     paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
     text = '\n\n'.join(
-        f"{p[0].upper()}{p[1:]}" if p else "" 
+        f"{p[0].upper()}{p[1:]}" if p else ""
         for p in paragraphs
     )
-    
     return text.strip()
 
 def clean_query(query: str) -> str:
@@ -734,16 +748,12 @@ async def build_chat_context(results: List[SearchResult]) -> str:
     file_map = {f['file_id']: f['filename'] for f in state_manager.file_metadata}
     
     for result in results:
-        # First pass: Clean basic formatting
         content = re.sub(r'[\n\r\t]', ' ', result.content).strip()
         content = re.sub(r'\s+', ' ', content)
-        
-        # Second pass: Fix number ranges and currency
         content = re.sub(r'(\d+)\s*([,.])\s*(\d+)', r'\1\2\3', content)
         content = re.sub(r'(\d+)\s*([a-zA-Z]+)\s*(\d+)', r'\1 \2 \3', content)
         content = re.sub(r'\$\s*(\d+)', r'$\1', content)
         
-        # Format with source metadata
         context.append(
             f"DOCUMENT: {file_map.get(result.document_id, 'Unknown')}\n"
             f"SECTION: {result.chunk_index}\n"
@@ -751,8 +761,7 @@ async def build_chat_context(results: List[SearchResult]) -> str:
             f"KEY_ENTITIES: {', '.join(result.entities) if result.entities else 'None'}"
         )
     
-    # Ensure we don't exceed token limits
-    return "\n\n---\n\n".join(context)[:7500]  # Conservative limit
+    return "\n\n---\n\n".join(context)[:7500]
 
 @retry(
     stop=stop_after_attempt(3),
@@ -763,12 +772,11 @@ def generate_coherent_response(query: str, context: str) -> str:
     """Generate properly formatted response with strict content separation"""
     validate_provider_settings()
     
-    # Initialize client based on provider
     try:
         if settings.openai_enabled:
             client = OpenAI(api_key=settings.openai_api_key)
         else:
-            client = None  # For Ollama, we'll use requests directly
+            client = None
     except Exception as e:
         logger.error(f"Failed to initialize client: {str(e)}")
         raise HTTPException(status_code=500, detail="Service configuration error")
@@ -779,6 +787,8 @@ def generate_coherent_response(query: str, context: str) -> str:
         - Never copy text verbatim from documents
         - Always reformat numbers as continuous strings (e.g., $1,000,000-$3,000,000)
         - Never put numbers/currency on separate lines
+        - Synthesize information from ALL provided documents, ensuring each relevant document is represented in the response
+        - If a document is irrelevant to the query, explicitly state so and focus on relevant ones
 
         2. FORMATTING RULES:
         - Replace all newlines between numbers with hyphens
@@ -786,9 +796,9 @@ def generate_coherent_response(query: str, context: str) -> str:
         - Ensure ranges use proper format (X-Y not X newline Y)
 
         3. OUTPUT STRUCTURE:
-        1. Overview paragraph
-        2. Bullet points (max 5)
-        3. Source reference"""
+        1. Overview paragraph summarizing findings from all relevant documents
+        2. Bullet points (3-5) highlighting key details, ensuring representation from each relevant document
+        3. Source references for each document mentioned, in the format: Source: [filename], section [X]"""
 
     user_prompt = f"""DOCUMENT CONTEXT:
 {context}
@@ -797,10 +807,11 @@ USER QUESTION:
 {query}
 
 RESPONSE REQUIREMENTS:
-1. Start with "This document discusses..." 
-2. Include 3-5 key points as bullet points
+1. Start with "This response synthesizes information from multiple documents regarding..." 
+2. Include 3-5 key points as bullet points, ensuring each relevant document is represented
 3. Format all numbers/currency properly
-4. End with "Source: [filename], section [X]" if available"""
+4. End with source references for each document used
+5. If a document is irrelevant, state: '[filename] does not contain relevant information for this query'"""
 
     try:
         if settings.openai_enabled:
@@ -828,7 +839,7 @@ RESPONSE REQUIREMENTS:
                     "max_tokens": settings.max_completion_tokens,
                     "temperature": 0.3
                 },
-                timeout=30  # Added timeout
+                timeout=30
             )
             response.raise_for_status()
             response_text = response.json()["choices"][0]["message"]["content"].strip()
@@ -843,7 +854,7 @@ RESPONSE REQUIREMENTS:
     except Exception as e:
         logger.error(f"Unexpected error in response generation: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to generate response")
-    
+
 # Exception handlers
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -1017,31 +1028,45 @@ async def search_documents(
                         )
                     )
 
-        query_chunks = split_large_text(cleaned_query)
         vector_results = []
+        query_chunks = split_large_text(cleaned_query)
+        per_doc_limit = max(1, limit // max(1, len(file_ids or [])))  # Distribute limit across documents
 
         for chunk in query_chunks:
             embedding = generate_embeddings_batch([chunk])[0]
-            query_filter = {
-                "must": [
-                    {"key": "user_id", "match": {"value": user_id}},
-                ]
-            }
             if file_ids:
-                query_filter["must"].append(
-                    {"key": "document_id", "match": {"any": file_ids}}
+                # Search each document separately to ensure diversity
+                for file_id in file_ids:
+                    query_filter = {
+                        "must": [
+                            {"key": "user_id", "match": {"value": user_id}},
+                            {"key": "document_id", "match": {"value": file_id}}
+                        ]
+                    }
+                    results = qdrant_handler.client.search(
+                        collection_name=settings.qdrant_collection,
+                        query_vector=embedding,
+                        query_filter=query_filter,
+                        limit=per_doc_limit
+                    )
+                    vector_results.extend(results)
+            else:
+                # Fallback to original search if no file_ids
+                query_filter = {
+                    "must": [
+                        {"key": "user_id", "match": {"value": user_id}},
+                    ]
+                }
+                results = qdrant_handler.client.search(
+                    collection_name=settings.qdrant_collection,
+                    query_vector=embedding,
+                    query_filter=query_filter,
+                    limit=limit
                 )
+                vector_results.extend(results)
 
-            results = qdrant_handler.client.search(
-                collection_name=settings.qdrant_collection,
-                query_vector=embedding,
-                query_filter=query_filter,
-                limit=limit
-            )
-            vector_results.extend(results)
-
-        combined_results = rank_results(entity_results, vector_results, limit)
-
+        combined_results = rank_results(entity_results, vector_results, limit, file_ids)
+        logger.debug(f"Search returned {len(combined_results)} results from {len(set(r.payload.get('document_id') for r in combined_results))} documents")
         return {
             "status": "success",
             "results": format_search_results(combined_results)
@@ -1066,7 +1091,7 @@ async def chat_with_documents(
             query=cleaned_query,
             user_id=user_id,
             file_ids=file_ids,
-            limit=5,  # Fewer but more relevant results
+            limit=5,
             use_graph=True
         )
 
