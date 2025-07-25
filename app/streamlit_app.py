@@ -10,7 +10,7 @@ import logging
 from io import BytesIO
 from typing import Dict, List, Optional
 from pathlib import Path
-from config import settings
+from app.config import settings
 from pyvis.network import Network
 import streamlit.components.v1 as components
 
@@ -27,18 +27,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
-STATE_FILE = Path(settings.data_dir) / "streamlit_state.json"
 FASTAPI_HOST = "rag-service"
 FASTAPI_PORT = "8000"
 
 class SessionState:
-    """Manage Streamlit session state with persistence"""
     def __init__(self):
-        self.state_file = STATE_FILE
         self._initialize_state()
 
     def _initialize_state(self):
-        """Initialize or load session state"""
         if "file_metadata" not in st.session_state:
             st.session_state.file_metadata = []
         if "chat_sessions" not in st.session_state:
@@ -49,99 +45,36 @@ class SessionState:
             st.session_state.selected_docs = []
         if "upload_key" not in st.session_state:
             st.session_state.upload_key = 0
-        self.load()
-
-    def save(self):
-        """Save session state to file"""
-        state = {
-            "file_metadata": st.session_state.file_metadata,
-            "chat_sessions": st.session_state.chat_sessions,
-            "selected_docs": st.session_state.selected_docs,
-            "current_chat_id": st.session_state.current_chat_id
-        }
-        try:
-            self.state_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.state_file, "w") as f:
-                json.dump(state, f)
-            logger.info("State saved successfully")
-        except Exception as e:
-            logger.error(f"Failed to save state: {str(e)}")
-
-    def load(self):
-        """Load session state from file"""
-        if self.state_file.exists():
-            try:
-                with open(self.state_file, "r") as f:
-                    state = json.load(f)
-                    st.session_state.file_metadata = state.get("file_metadata", [])
-                    st.session_state.chat_sessions = state.get("chat_sessions", {})
-                    st.session_state.selected_docs = state.get("selected_docs", [])
-                    st.session_state.current_chat_id = state.get("current_chat_id", None)
-                logger.info("State loaded successfully")
-            except Exception as e:
-                logger.error(f"Failed to load state: {str(e)}")
 
 session_state = SessionState()
 
 def update_selected_docs():
-    """Update selected documents based on checkbox states"""
     selected = []
     for file in st.session_state.file_metadata:
         checkbox_key = f"doc_select_{file['file_id']}"
         if st.session_state.get(checkbox_key, False):
             selected.append(file['file_id'])
     st.session_state.selected_docs = selected
-    session_state.save()
 
 def handle_select_all():
-    """Select all documents checkbox handler"""
     for file in st.session_state.file_metadata:
         st.session_state[f"doc_select_{file['file_id']}"] = True
     update_selected_docs()
 
 def handle_clear_all():
-    """Clear all documents checkbox handler"""
     for file in st.session_state.file_metadata:
         st.session_state[f"doc_select_{file['file_id']}"] = False
     update_selected_docs()
 
 def create_new_chat():
-    """Create a new chat session"""
-    chat_id = str(uuid.uuid4())
-    st.session_state.chat_sessions[chat_id] = {
-        "chat_id": chat_id,
-        "user_id": st.session_state.get("user_id", "default_user"),
-        "messages": [],
-        "created_at": datetime.datetime.now().isoformat(),
-        "updated_at": datetime.datetime.now().isoformat(),
-        "document_ids": st.session_state.selected_docs.copy()
-    }
-    st.session_state.current_chat_id = chat_id
-    session_state.save()
+    st.session_state.current_chat_id = None
+    st.session_state.selected_docs = []
     st.rerun()
 
-def delete_chat(chat_id: str):
-    """Delete a chat session"""
-    if chat_id in st.session_state.chat_sessions:
-        del st.session_state.chat_sessions[chat_id]
-    if st.session_state.current_chat_id == chat_id:
-        st.session_state.current_chat_id = None
-    session_state.save()
-    st.rerun()
-
-def get_file_preview_url(filename: str) -> Optional[str]:
-    """Generate a URL for file preview"""
-    file_meta = next(
-        (f for f in st.session_state.file_metadata if f['filename'] == filename),
-        None
-    )
-    if not file_meta:
-        return None
-    file_id = file_meta['file_id']
-    return f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/preview/{file_id}?user_id={file_meta['user_id']}&X-API-Key={settings.openai_api_key}"
+def get_file_preview_url(file_id: str, user_id: str) -> Optional[str]:
+    return f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/preview/{file_id}?user_id={user_id}&X-API-Key={settings.openai_api_key}"
 
 def render_document_management(user_id: str):
-    """Render the document management sidebar"""
     st.sidebar.title("Document Management")
 
     with st.sidebar.expander("Upload Documents", expanded=True):
@@ -157,6 +90,7 @@ def render_document_management(user_id: str):
             accept_multiple_files=True,
             key=f"file_uploader_{st.session_state.upload_key}"
         )
+        category = st.selectbox("Category", ["submittals", "payrolls", "bank_statements", "other"], index=0)
 
         if uploaded_files and not st.session_state.get("upload_trigger", False):
             st.session_state.upload_trigger = True
@@ -169,7 +103,7 @@ def render_document_management(user_id: str):
                         continue
 
                     files = {"file": (uploaded_file.name, uploaded_file, uploaded_file.type)}
-                    data = {"user_id": user_id}
+                    data = {"user_id": user_id, "category": category if category != "other" else None}
                     try:
                         response = requests.post(
                             f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/process_file",
@@ -178,16 +112,6 @@ def render_document_management(user_id: str):
                             headers={"X-API-Key": settings.openai_api_key}
                         )
                         if response.status_code == 200:
-                            result = response.json()
-                            st.session_state.file_metadata.append({
-                                "file_id": result["file_id"],
-                                "filename": result["filename"],
-                                "file_type": os.path.splitext(result["filename"])[1].lower(),
-                                "upload_date": datetime.datetime.now().isoformat(),
-                                "size": uploaded_file.size,
-                                "content": base64.b64encode(uploaded_file.getvalue()).decode(),
-                                "user_id": user_id
-                            })
                             success_count += 1
                         else:
                             error_messages.append(f"Upload failed for {uploaded_file.name}")
@@ -197,7 +121,6 @@ def render_document_management(user_id: str):
             if success_count > 0:
                 st.success(f"Uploaded {success_count} file(s)")
                 st.session_state.upload_key += 1
-                session_state.save()
                 st.rerun()
             if error_messages:
                 for error in error_messages:
@@ -214,29 +137,57 @@ def render_document_management(user_id: str):
 
         if response.status_code == 200:
             documents = response.json().get("documents", [])
+            st.session_state.file_metadata = documents
             if documents:
+                col1, col2 = st.sidebar.columns([1, 1])
+                with col1:
+                    if st.button("Select All"):
+                        handle_select_all()
+                with col2:
+                    if st.button("Clear All"):
+                        handle_clear_all()
+
                 for file in documents:
                     with st.sidebar.container():
-                        cols = st.columns([3, 1, 1, 1])
+                        cols = st.columns([3, 1, 1])
                         with cols[0]:
-                            st.write(f"**{file['filename']}**")
+                            checkbox_key = f"doc_select_{file['file_id']}"
+                            if st.checkbox(
+                                f"{file['filename']} ({file['status']})",
+                                key=checkbox_key,
+                                value=file['file_id'] in st.session_state.selected_docs,
+                                on_change=update_selected_docs
+                            ):
+                                pass
                             st.caption(f"{file['file_type']} - {file['upload_date']} - {file['size']/1024:.1f} KB")
-
+                            category = st.selectbox(
+                                "Category",
+                                ["submittals", "payrolls", "bank_statements", "other"],
+                                index=["submittals", "payrolls", "bank_statements", "other"].index(file['category'] or "other"),
+                                key=f"category_{file['file_id']}"
+                            )
+                            if category != file['category']:
+                                try:
+                                    response = requests.patch(
+                                        f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/documents/{file['file_id']}",
+                                        data={"user_id": user_id, "category": category if category != "other" else None},
+                                        headers={"X-API-Key": settings.openai_api_key}
+                                    )
+                                    if response.status_code == 200:
+                                        file['category'] = category
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Failed to update category: {response.text}")
+                                except Exception as e:
+                                    st.error(f"Error updating category: {str(e)}")
                         with cols[1]:
-                            preview_url = get_file_preview_url(file['filename'])
+                            preview_url = get_file_preview_url(file['file_id'], user_id)
                             if preview_url:
                                 st.markdown(
-                                    f'<a href="/preview/{file["filename"]}" target="_blank" style="text-decoration: none;">🔍</a>',
+                                    f'<a href="{preview_url}" target="_blank" style="text-decoration: none;">🔍</a>',
                                     unsafe_allow_html=True
                                 )
-
                         with cols[2]:
-                            st.markdown(
-                                f'<a href="?page=debug&file_id={file["file_id"]}" target="_self" style="text-decoration: none;">🐞</a>',
-                                unsafe_allow_html=True
-                            )
-
-                        with cols[3]:
                             if st.button("🗑️", key=f"delete_{file['file_id']}"):
                                 try:
                                     with st.spinner("Deleting..."):
@@ -251,299 +202,226 @@ def render_document_management(user_id: str):
                                         ]
                                         if file['file_id'] in st.session_state.selected_docs:
                                             st.session_state.selected_docs.remove(file['file_id'])
-                                        session_state.save()
                                         st.rerun()
                                 except Exception as e:
                                     st.error(f"Delete error: {str(e)}")
             else:
                 st.sidebar.info("No documents uploaded yet.")
+        else:
+            st.sidebar.error(f"Error loading documents: {response.text}")
     except Exception as e:
         st.sidebar.error(f"Error loading documents: {str(e)}")
 
-def render_chat_sessions(user_id: str):
-    """Render the chat sessions sidebar"""
-    st.sidebar.title("Chat Sessions")
+def render_prompt_management(user_id: str):
+    st.sidebar.title("Prompt Management")
+    with st.sidebar.expander("Create/Edit Prompt"):
+        category = st.text_input("Category Name", key="prompt_category")
+        prompt_text = st.text_area("Prompt Content", height=200, key="prompt_text")
+        if st.button("Save Prompt"):
+            if not category or not prompt_text:
+                st.error("Category and prompt text are required.")
+            else:
+                try:
+                    response = requests.post(
+                        f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/prompts",
+                        data={"category": category, "prompt": prompt_text, "user_id": user_id},
+                        headers={"X-API-Key": settings.openai_api_key}
+                    )
+                    if response.status_code == 200:
+                        st.success("Prompt saved successfully")
+                        st.rerun()
+                    else:
+                        st.error(f"Failed to save prompt: {response.text}")
+                except Exception as e:
+                    st.error(f"Error saving prompt: {str(e)}")
 
+    st.sidebar.markdown("### Existing Prompts")
+    try:
+        response = requests.get(
+            f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/prompts?user_id={user_id}",
+            headers={"X-API-Key": settings.openai_api_key}
+        )
+        if response.status_code == 200:
+            prompts = response.json().get("prompts", [])
+            for prompt in prompts:
+                with st.sidebar.expander(f"Prompt: {prompt['category']}"):
+                    st.write(f"**Created**: {prompt['created_at']}")
+                    st.write(f"**Updated**: {prompt['updated_at']}")
+                    st.text_area("Prompt", value=prompt['prompt'], disabled=True, key=f"prompt_view_{prompt['id']}")
+                    if st.button("Delete", key=f"delete_prompt_{prompt['id']}"):
+                        try:
+                            response = requests.delete(
+                                f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/prompts/{prompt['category']}?user_id={user_id}",
+                                headers={"X-API-Key": settings.openai_api_key}
+                            )
+                            if response.status_code == 200:
+                                st.success(f"Prompt {prompt['category']} deleted")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed to delete prompt: {response.text}")
+                        except Exception as e:
+                            st.error(f"Error deleting prompt: {str(e)}")
+        else:
+            st.sidebar.info("No prompts defined yet.")
+    except Exception as e:
+        st.sidebar.error(f"Error loading prompts: {str(e)}")
+
+def render_chat_sessions(user_id: str):
+    st.sidebar.title("Chat Sessions")
     if st.sidebar.button("+ New Chat", key="new_chat_button"):
         create_new_chat()
 
-    for chat_id, chat_data in st.session_state.chat_sessions.items():
-        if chat_data['user_id'] != user_id:
-            continue
-
-        cols = st.sidebar.columns([4, 1])
-        with cols[0]:
-            if st.button(
-                f"💬 {chat_id[:8]}... ({len(chat_data['messages']) // 2} messages)",
-                key=f"chat_{chat_id}",
-                use_container_width=True
-            ):
-                st.session_state.current_chat_id = chat_id
-                st.session_state.selected_docs = chat_data['document_ids'].copy()
-                st.rerun()
-        with cols[1]:
-            if st.button(
-                "❌",
-                key=f"delete_chat_{chat_id}",
-                on_click=delete_chat,
-                args=(chat_id,)
-            ):
-                pass
-
-def render_chat_interface(user_id: str):
-    """Render the main chat interface"""
-    st.title("RAG Chat Interface")
-
-    # Document selection
-    if st.session_state.file_metadata:
-        st.markdown("### Select Documents for Context")
-        
-        # Initialize selected_docs if not exists
-        if 'selected_docs' not in st.session_state:
-            st.session_state.selected_docs = []
-        
-        # Select All/Clear All buttons
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Select All", on_click=handle_select_all):
-                pass
-        with col2:
-            if st.button("Clear All", on_click=handle_clear_all):
-                pass
-        
-        st.markdown(f"**Selected Documents**: {len(st.session_state.selected_docs)}")
-        
-        # Display checkboxes in a scrollable container
-        with st.container(height=200):
-            for file in st.session_state.file_metadata:
-                if file.get("user_id") == user_id:
-                    checkbox_key = f"doc_select_{file['file_id']}"
-                    if checkbox_key not in st.session_state:
-                        st.session_state[checkbox_key] = file['file_id'] in st.session_state.selected_docs
-                    
-                    st.checkbox(
-                        file['filename'],
-                        value=st.session_state[checkbox_key],
-                        key=checkbox_key,
-                        on_change=update_selected_docs
-                    )
-
-    # Chat input
-    st.markdown("### Chat")
-    query = st.text_area("Enter your query", height=100, key="query_input")
-
-    if st.button("Send", key="send_button"):
-        if not query or not user_id:
-            st.error("Please enter a query.")
-        elif not st.session_state.selected_docs:
-            st.error("Please select at least one document.")
-        else:
-            with st.spinner("Processing query..."):
-                try:
-                    # Send query to chat endpoint
-                    chat_payload = {
-                        "query": query,
-                        "user_id": user_id,
-                        "file_ids": st.session_state.selected_docs,
-                        "chat_id": st.session_state.current_chat_id
-                    }
-                    chat_response = requests.post(
-                        f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/chat",
-                        data=chat_payload,
-                        headers={"X-API-Key": settings.openai_api_key}
-                    )
-                    
-                    if chat_response.status_code == 200:
-                        result = chat_response.json()
-                        answer = clean_response(result["response"])
-                        
-                        # Update chat history
-                        current_chat = st.session_state.chat_sessions.get(st.session_state.current_chat_id, {})
-                        if current_chat:
-                            current_chat['messages'].append({
-                                "role": "user",
-                                "content": query,
-                                "timestamp": datetime.datetime.now().isoformat()
-                            })
-                            current_chat['messages'].append({
-                                "role": "assistant",
-                                "content": answer,
-                                "timestamp": datetime.datetime.now().isoformat()
-                            })
-                            current_chat['updated_at'] = datetime.datetime.now().isoformat()
-                            current_chat['document_ids'] = st.session_state.selected_docs.copy()
-                            session_state.save()
-
-                        # Display response
-                        st.write(f"**Query**: {query}")
-                        st.write(f"**Response**: {answer}")
-
-                        if result.get("sources"):
-                            st.subheader("Sources")
-                            unique_sources = {}
-                            for source in result["sources"]:
-                                if source['document_id'] not in unique_sources:
-                                    unique_sources[source['document_id']] = source
-                            for source in unique_sources.values():
-                                st.write(f"- **{source['filename']}** (Section {source['chunk_index']})")
-                    else:
-                        st.error(f"Chat error: {chat_response.text}")
-                except Exception as e:
-                    st.error(f"Chat error: {str(e)}")
-
-    # Display chat history
-    st.markdown("### Chat History")
-    current_chat = st.session_state.chat_sessions.get(st.session_state.current_chat_id, {})
-    for msg in current_chat.get('messages', []):
-        if msg['role'] == 'user':
-            st.markdown(f"**🗣️ User** ({msg['timestamp']}):")
-            st.markdown(f"> {msg['content']}")
-        else:
-            st.markdown(f"**🤖 AI**:")
-            st.markdown(msg['content'])
-        st.markdown("---")
-
-def clean_response(text: str) -> str:
-    """Clean response text for display"""
-    text = re.sub(r'\n+', '\n', text).strip()
-    text = re.sub(r'[\*\_\`\#]{2,}', '', text)
-    return text
-
-def render_knowledge_graph(user_id: str, file_id: Optional[str] = None):
-    """Render the knowledge graph visualization"""
-    st.markdown("### Knowledge Graph")
     try:
-        with st.spinner("Loading knowledge graph..."):
-            url = f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/knowledge_graph?user_id={user_id}"
-            if file_id:
-                url += f"&file_id={file_id}"
-            response = requests.get(
-                url,
-                headers={"X-API-Key": settings.openai_api_key}
-            )
-
+        response = requests.get(
+            f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/chat_sessions?user_id={user_id}",
+            headers={"X-API-Key": settings.openai_api_key}
+        )
         if response.status_code == 200:
-            graph_data = response.json()
-            if not graph_data["nodes"]:
-                st.warning("No knowledge graph data available")
-                return
-            
-            net = Network(height="600px", width="100%", directed=True, notebook=True)
-            for node in graph_data["nodes"]:
-                net.add_node(
-                    node["id"],
-                    label=node["label"],
-                    color="#4CAF50" if node["type"] == "entity" else "#2196F3"
-                )
-            for edge in graph_data["edges"]:
-                net.add_edge(edge["from"], edge["to"], title=edge["label"])
-
-            temp_file = f"/tmp/knowledge_graph_{user_id}_{file_id if file_id else 'all'}.html"
-            net.write_html(temp_file)
-            with open(temp_file, "r") as f:
-                html_content = f.read()
-            components.html(html_content, height=600)
+            sessions = response.json().get("chat_sessions", [])
+            st.session_state.chat_sessions = {s["chat_id"]: s for s in sessions}
+            for chat_id, chat_data in sorted(
+                st.session_state.chat_sessions.items(),
+                key=lambda x: x[1]["updated_at"],
+                reverse=True
+            ):
+                if chat_data['user_id'] != user_id:
+                    continue
+                cols = st.sidebar.columns([4, 1])
+                with cols[0]:
+                    created_at = datetime.datetime.fromisoformat(chat_data['created_at']).strftime("%Y-%m-%d %H:%M")
+                    if st.button(f"Chat {created_at} ({len(chat_data['messages'])} messages)", key=f"chat_{chat_id}"):
+                        st.session_state.current_chat_id = chat_id
+                        st.session_state.selected_docs = chat_data['document_ids']
+                        st.rerun()
+                with cols[1]:
+                    if st.button("🗑️", key=f"delete_chat_{chat_id}"):
+                        try:
+                            response = requests.delete(
+                                f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/chat_sessions/{chat_id}?user_id={user_id}",
+                                headers={"X-API-Key": settings.openai_api_key}
+                            )
+                            if response.status_code == 200:
+                                if st.session_state.current_chat_id == chat_id:
+                                    st.session_state.current_chat_id = None
+                                del st.session_state.chat_sessions[chat_id]
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"Error deleting chat: {str(e)}")
+        else:
+            st.sidebar.error(f"Error loading chat sessions: {response.text}")
     except Exception as e:
-        st.error(f"Error loading knowledge graph: {str(e)}")
+        st.sidebar.error(f"Error loading chat sessions: {str(e)}")
 
-def render_debug_page():
-    """Render the debug page for a specific file"""
-    file_id = st.query_params.get("file_id", [None])[0]
-    if not file_id:
-        st.error("No File ID provided")
-        st.button("Back to Main", on_click=lambda: st.query_params.update(page="main"))
+def render_entity_graph(sources: List[Dict]):
+    if not sources:
         return
+    net = Network(height="400px", width="100%", directed=True, notebook=True)
+    nodes = set()
+    node_types = {}
 
-    file_meta = next(
-        (f for f in st.session_state.file_metadata if f['file_id'] == file_id),
-        None
-    )
+    for source in sources:
+        entities = source.get("entities", [])
+        relationships = source.get("relationships", [])
+        filename = source.get("filename", "Unknown")
+        for entity in entities:
+            nodes.add(entity)
+            node_types[entity] = "entity"
+        for rel in relationships:
+            source_node = rel.get("source")
+            target_node = rel.get("target")
+            relation = rel.get("relation")
+            if source_node and target_node:
+                nodes.add(source_node)
+                nodes.add(target_node)
+                node_types[source_node] = "entity"
+                node_types[target_node] = "entity"
+                net.add_edge(source_node, target_node, label=relation, title=f"From {filename}")
 
-    if not file_meta:
-        st.error("File not found")
-        st.button("Back to Main", on_click=lambda: st.query_params.update(page="main"))
-        return
+    for node in nodes:
+        net.add_node(node, label=node, title=node_types.get(node, "entity"), color="#ADD8E6")
 
-    st.title(f"Debug: {file_meta['filename']}")
-    
-    st.markdown("### File Metadata")
-    cols = st.columns(2)
-    with cols[0]:
-        st.metric("Filename", file_meta['filename'])
-        st.metric("File Type", file_meta['file_type'])
-    with cols[1]:
-        st.metric("Upload Date", file_meta['upload_date'])
-        st.metric("Size", f"{file_meta['size'] / 1024:.1f} KB")
+    net.set_options("""
+    var options = {
+        "nodes": {"font": {"size": 12}},
+        "edges": {"font": {"size": 10}, "arrows": "to"},
+        "physics": {"barnesHut": {"gravitationalConstant": -2000}}
+    }
+    """)
+    net.save_graph("temp_graph.html")
+    with open("temp_graph.html", "r") as f:
+        html_content = f.read()
+    components.html(html_content, height=400)
 
-    with st.expander("Content Preview"):
-        if file_meta.get('markdown_content'):
-            st.text_area(
-                "Markdown Content",
-                value=file_meta['markdown_content'],
-                height=300,
-                disabled=True
-            )
-
-    st.markdown("### Vector Database Chunks")
-    try:
-        with st.spinner("Querying vector database..."):
-            response = requests.post(
-                f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/search",
-                data={
-                    "query": "",
-                    "user_id": file_meta['user_id'],
-                    "file_ids": [file_id],
-                    "limit": 50,
-                    "use_graph": False
-                },
-                headers={"X-API-Key": settings.openai_api_key}
-            )
-
-        if response.status_code == 200:
-            points = response.json().get("results", [])
-            if points:
-                for point in points:
-                    with st.expander(f"Chunk {point['chunk_index']}"):
-                        st.json({
-                            "id": point['chunk_id'],
-                            "content_preview": f"{point['content'][:200]}...",
-                            "entities": point['entities'],
-                            "relationships": point['relationships'],
-                            "score": point['score']
-                        })
-    except Exception as e:
-        st.error(f"Failed to query chunks: {str(e)}")
-
-    render_knowledge_graph(file_meta['user_id'], file_id)
-    st.button("Back to Main", on_click=lambda: st.query_params.update(page="main"))
-
-def render_main_page():
-    """Render the main application page"""
-    st.title("RAG Microservice Interface")
-    st.warning("Note: Hard reloading (Ctrl+F5) will clear in-memory state")
-
-    user_id = st.text_input(
-        "Enter User ID",
-        value="default_user",
-        key="user_id_input"
-    )
-    if user_id:
-        st.session_state.user_id = user_id
+def main():
+    st.set_page_config(page_title="PDFLLM RAG App", layout="wide", initial_sidebar_state="expanded")
+    user_id = "default_user"
 
     render_document_management(user_id)
+    render_prompt_management(user_id)
     render_chat_sessions(user_id)
 
-    if st.session_state.current_chat_id:
-        render_chat_interface(user_id)
-    else:
-        st.write("Create or select a chat session to begin.")
+    st.title("PDFLLM RAG App")
+    category = st.selectbox("Query Category", ["all", "submittals", "payrolls", "bank_statements"], index=0)
 
-# Router
-page = st.query_params.get("page", ["main"])[0]
-if page == "main":
-    render_main_page()
-elif page == "debug":
-    render_debug_page()
-else:
-    st.error(f"Invalid page: {page}")
-    st.button("Go to Main Page", on_click=lambda: st.query_params.update(page="main"))
+    if st.session_state.current_chat_id:
+        chat_data = st.session_state.chat_sessions.get(st.session_state.current_chat_id, {})
+        st.markdown(f"### Chat Session: {chat_data.get('created_at', 'New Chat')}")
+        chat_container = st.container()
+        with chat_container:
+            for message in chat_data.get("messages", []):
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+                    if message["role"] == "assistant" and "sources" in message:
+                        with st.expander("Sources"):
+                            for source in message["sources"]:
+                                st.write(f"**{source['filename']}** (Section {source['chunk_index']}): {source['content'][:200]}...")
+                            st.markdown("### Entity-Relationship Graph")
+                            render_entity_graph(message["sources"])
+
+    query = st.chat_input("Enter your query")
+    if query:
+        try:
+            with st.spinner("Processing query..."):
+                data = {
+                    "query": query,
+                    "user_id": user_id,
+                    "file_ids": st.session_state.selected_docs,
+                    "chat_id": st.session_state.current_chat_id,
+                    "category": category
+                }
+                response = requests.post(
+                    f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/chat",
+                    data=data,
+                    headers={"X-API-Key": settings.openai_api_key}
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    st.session_state.current_chat_id = result["chat_id"]
+                    if st.session_state.current_chat_id not in st.session_state.chat_sessions:
+                        st.session_state.chat_sessions[st.session_state.current_chat_id] = {
+                            "chat_id": result["chat_id"],
+                            "user_id": user_id,
+                            "created_at": datetime.datetime.now().isoformat(),
+                            "updated_at": datetime.datetime.now().isoformat(),
+                            "document_ids": st.session_state.selected_docs,
+                            "messages": []
+                        }
+                    st.session_state.chat_sessions[st.session_state.current_chat_id]["messages"].append(
+                        {"role": "user", "content": query, "timestamp": datetime.datetime.now().isoformat()}
+                    )
+                    st.session_state.chat_sessions[st.session_state.current_chat_id]["messages"].append(
+                        {
+                            "role": "assistant",
+                            "content": result["response"],
+                            "timestamp": datetime.datetime.now().isoformat(),
+                            "sources": result["sources"]
+                        }
+                    )
+                    st.rerun()
+                else:
+                    st.error(f"Query failed: {response.text}")
+        except Exception as e:
+            st.error(f"Query error: {str(e)}")
+
+if __name__ == "__main__":
+    main()

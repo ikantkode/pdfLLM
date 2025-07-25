@@ -1,6 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, model_validator
-from typing import List, Dict
+from pydantic import Field
 import logging
 
 # Configure logging
@@ -22,7 +21,7 @@ class Settings(BaseSettings):
     data_dir: str = "./data"
 
     # Supported file extensions
-    supported_extensions: Dict[str, List[str]] = {
+    supported_extensions: dict[str, list[str]] = {
         "pdfs": [".pdf"],
         "images": [".jpg", ".jpeg", ".png", ".heic", ".webp"],
         "documents": [".doc", ".docx", ".odt"],
@@ -52,25 +51,21 @@ class Settings(BaseSettings):
     qdrant_port: int = 6333
     qdrant_collection: str = "documents"
 
-    # Dgraph settings
-    dgraph_host: str = "dgraph"
-    dgraph_port: int = 9080
-    dgraph_token: str = Field("", env="DGRAPH_TOKEN")
+    # PostgreSQL settings
+    postgres_host: str = Field("postgres", env="POSTGRES_HOST")
+    postgres_port: int = Field(9011, env="POSTGRES_PORT")
+    postgres_db: str = Field("ragdb", env="POSTGRES_DB")
+    postgres_user: str = Field("raguser", env="POSTGRES_USER")
+    postgres_password: str = Field("ragpassword", env="POSTGRES_PASSWORD")
 
-    # Knowledge Graph settings
-    max_graph_depth: int = 3
+    # Celery settings
+    celery_broker_url: str = Field("redis://redis:6379/0", env="CELERY_BROKER_URL")
+    celery_result_backend: str = Field("redis://redis:6379/0", env="CELERY_RESULT_BACKEND")
 
-    # Settings config
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore"
     )
-
-    @model_validator(mode='after')
-    def log_settings(self):
-        logger.info(f"OPENAI_ENABLED: {self.openai_enabled}")
-        logger.info(f"OLLAMA_ENABLED: {self.ollama_enabled}")
-        return self
 
 settings = Settings()

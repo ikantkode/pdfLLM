@@ -6,7 +6,7 @@ import spacy
 from openai import OpenAI
 import tiktoken
 import requests
-from config import settings
+from app.config import settings
 from tenacity import retry, stop_after_attempt, wait_exponential
 import nltk
 from nltk.tokenize import sent_tokenize

@@ -6,7 +6,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from qdrant_client.http.models import PointStruct, Filter, FieldCondition, MatchValue
 
-from config import settings
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 

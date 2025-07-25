@@ -2,65 +2,189 @@ version: '3.8'
 
 services:
   rag-service:
-    build: .
-    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
     volumes:
       - ./data:/app/data
       - ./data/logs:/app/data/logs
+      - ./.env:/app/.env
     env_file:
       - .env
     environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - DGRAPH_TOKEN=${DGRAPH_TOKEN}
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+      - POSTGRES_PORT=${POSTGRES_PORT:-9011}
+      - POSTGRES_DB=${POSTGRES_DB:-ragdb}
+      - POSTGRES_USER=${POSTGRES_USER:-raguser}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ragpassword}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      - QDRANT_HOST=${QDRANT_HOST:-qdrant}
+      - QDRANT_PORT=${QDRANT_PORT:-6333}
     depends_on:
-      dgraph:
+      postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
       qdrant:
         condition: service_started
+    networks:
+      - pdfllm
+    restart: unless-stopped
 
   streamlit-service:
-    build: .
-    command: streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: streamlit run app/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
     ports:
       - "8501:8501"
     volumes:
-      - ./app:/app
       - ./data:/app/data
       - ./data/logs:/app/data/logs
+      - ./.env:/app/.env
     env_file:
       - .env
     environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - DGRAPH_TOKEN=${DGRAPH_TOKEN}
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+      - POSTGRES_PORT=${POSTGRES_PORT:-9011}
+      - POSTGRES_DB=${POSTGRES_DB:-ragdb}
+      - POSTGRES_USER=${POSTGRES_USER:-raguser}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ragpassword}
+      - FASTAPI_URL=http://rag-service:8000
+      - QDRANT_HOST=${QDRANT_HOST:-qdrant}
+      - QDRANT_PORT=${QDRANT_PORT:-6333}
     depends_on:
       rag-service:
         condition: service_started
-      dgraph:
+      postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - pdfllm
+    restart: unless-stopped
+
+  celery:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A app.celery_app worker --loglevel=info
+    volumes:
+      - ./data:/app/data
+      - ./data/logs:/app/data/logs
+      - ./.env:/app/.env
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+      - POSTGRES_PORT=${POSTGRES_PORT:-9011}
+      - POSTGRES_DB=${POSTGRES_DB:-ragdb}
+      - POSTGRES_USER=${POSTGRES_USER:-raguser}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ragpassword}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      - QDRANT_HOST=${QDRANT_HOST:-qdrant}
+      - QDRANT_PORT=${QDRANT_PORT:-6333}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+    networks:
+      - pdfllm
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15
+    ports:
+      - "9011:9011"
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-ragdb}
+      - POSTGRES_USER=${POSTGRES_USER:-raguser}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ragpassword}
+      - PGPORT=9011
+    volumes:
+      - pdfllm_postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 9011 -U ${POSTGRES_USER:-raguser} -d ${POSTGRES_DB:-ragdb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - pdfllm
+    restart: unless-stopped
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    ports:
+      - "9012:80"
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_DEFAULT_EMAIL:-admin@admin.com}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD:-admin}
+    volumes:
+      - pdfllm_pgadmin-data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      echo '${POSTGRES_HOST:-postgres}:9011:*:${POSTGRES_USER:-raguser}:${POSTGRES_PASSWORD:-ragpassword}' > /tmp/pgpassfile &&
+      chmod 600 /tmp/pgpassfile &&
+      /entrypoint.sh
+      "
+    networks:
+      - pdfllm
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    volumes:
+      - pdfllm_redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pdfllm
+    restart: unless-stopped
 
   qdrant:
     image: qdrant/qdrant:latest
     ports:
       - "6333:6333"
+      - "6334:6334"
     volumes:
       - pdfllm_qdrant-data:/qdrant/storage
+    networks:
+      - pdfllm
+    restart: unless-stopped
 
-  dgraph:
-    image: dgraph/standalone:latest
-    ports:
-      - "8030:8080"
-      - "9080:9080"
-    volumes:
-      - pdfllm_dgraph-data:/dgraph
-    healthcheck:
-      test: ["CMD", "curl", "-s", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+networks:
+  pdfllm:
+    driver: bridge
 
 volumes:
+  pdfllm_postgres-data:
+  pdfllm_pgadmin-data:
+  pdfllm_redis-data:
   pdfllm_qdrant-data:
-  pdfllm_dgraph-data:

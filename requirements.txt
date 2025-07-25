@@ -2,6 +2,9 @@
 fastapi==0.115.0
 uvicorn==0.30.6
 streamlit==1.39.0
+psycopg2-binary==2.9.9
+celery==5.4.0
+redis==5.0.8
 
 # Document processing
 pytesseract==0.3.13
@@ -35,4 +38,3 @@ pydantic-settings==2.5.2
 
 # Graph Visualization
 pyvis==0.3.2
-pydgraph==24.2.1
