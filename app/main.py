@@ -66,6 +66,7 @@ api_key_header = APIKeyHeader(name="X-API-Key")
 
 async def validate_api_key(api_key: str = Depends(api_key_header)):
     if settings.openai_enabled and api_key != settings.openai_api_key:
+        logger.error(f"Invalid API key provided: {api_key[:4]}...")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API Key"
@@ -123,13 +124,19 @@ Path(settings.temp_upload_dir).mkdir(parents=True, exist_ok=True)
 
 # PostgreSQL connection
 def get_db_connection():
-    return psycopg2.connect(
-        host=settings.postgres_host,
-        port=settings.postgres_port,
-        database=settings.postgres_db,
-        user=settings.postgres_user,
-        password=settings.postgres_password
-    )
+    try:
+        conn = psycopg2.connect(
+            host=settings.postgres_host,
+            port=settings.postgres_port,
+            database=settings.postgres_db,
+            user=settings.postgres_user,
+            password=settings.postgres_password
+        )
+        logger.debug("PostgreSQL connection established")
+        return conn
+    except Exception as e:
+        logger.error(f"Failed to connect to PostgreSQL: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database connection failed: {str(e)}")
 
 # Models
 class FileMetadata(BaseModel):
@@ -573,48 +580,104 @@ async def process_file(
     api_key: str = Depends(validate_api_key)
 ):
     validate_provider_settings()
-    if file.size > settings.max_document_size:
+    
+    # Validate file extension
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    supported_extensions = (
+        settings.supported_extensions['images'] +
+        settings.supported_extensions['documents'] +
+        settings.supported_extensions['spreadsheets'] +
+        settings.supported_extensions['text'] +
+        settings.supported_extensions['pdfs']
+    )
+    if file_ext not in supported_extensions:
+        logger.error(f"Unsupported file extension {file_ext} for file {file.filename}")
         raise HTTPException(
             status_code=400,
-            detail=f"File size exceeds {settings.max_document_size//(1024*1024)}MB limit"
+            detail=f"Unsupported file type: {file_ext}. Supported types: {', '.join(supported_extensions)}"
+        )
+
+    # Validate file size
+    if file.size > settings.max_document_size:
+        logger.error(f"File {file.filename} size {file.size} exceeds limit {settings.max_document_size}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"File size {file.size/(1024*1024):.2f}MB exceeds {settings.max_document_size/(1024*1024):.2f}MB limit"
         )
 
     conn = get_db_connection()
     try:
+        # Check for existing file
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT file_id FROM file_metadata WHERE filename = %s AND user_id = %s",
                 (file.filename, user_id)
             )
-            if cur.fetchone():
-                logger.info(f"File {file.filename} already exists for user {user_id}")
+            existing_file = cur.fetchone()
+            if existing_file:
+                logger.info(f"File {file.filename} already exists for user {user_id} with file_id {existing_file[0]}")
                 return {
                     "status": "success",
-                    "file_id": cur.fetchone()[0],
+                    "file_id": existing_file[0],
                     "filename": file.filename
                 }
 
         file_id = str(uuid.uuid4())
-        file_content = await file.read()
-        file_ext = os.path.splitext(file.filename)[1].lower()
+        try:
+            file_content = await file.read()
+            if not file_content:
+                logger.error(f"Empty file content for {file.filename}")
+                raise HTTPException(status_code=400, detail="Empty file content")
+        except Exception as e:
+            logger.error(f"Failed to read file {file.filename}: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
+
+        # Save file to temp_upload_dir
+        temp_file_path = Path(settings.temp_upload_dir) / f"{file_id}{file_ext}"
+        try:
+            with open(temp_file_path, "wb") as f:
+                f.write(file_content)
+            logger.debug(f"Saved file {file.filename} to {temp_file_path}")
+        except Exception as e:
+            logger.error(f"Failed to save file {file.filename} to {temp_file_path}: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to save file to disk: {str(e)}")
+
         checksum = hashlib.md5(file_content).hexdigest()
 
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO file_metadata (file_id, filename, file_type, content, user_id, size, checksum, category, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (file_id, file.filename, file_ext, file_content, user_id, file.size, checksum, category, "pending")
-            )
-            conn.commit()
+        # Insert metadata into database
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO file_metadata (file_id, filename, file_type, content, user_id, size, checksum, category, status, upload_date)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (file_id, file.filename, file_ext, file_content, user_id, file.size, checksum, category, "pending", datetime.datetime.now())
+                )
+                conn.commit()
+                logger.info(f"Inserted metadata for file {file.filename} (ID: {file_id})")
+        except psycopg2.Error as e:
+            logger.error(f"Database error inserting metadata for {file.filename}: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-        celery_app.send_task(
-            "app.celery_app.process_ocr",
-            args=[file_id, user_id, file_ext, category],
-            kwargs={"filename": file.filename}
-        )
-        logger.info(f"Queued OCR processing for file: {file.filename} (ID: {file_id})")
+        # Queue Celery task
+        try:
+            task = celery_app.send_task(
+                "app.celery_app.process_ocr",
+                args=[file_id, user_id, file_ext, category],
+                kwargs={"filename": file.filename}
+            )
+            logger.info(f"Queued OCR processing for file: {file.filename} (ID: {file_id}, Task ID: {task.id})")
+        except Exception as e:
+            logger.error(f"Failed to queue Celery task for {file.filename}: {str(e)}")
+            # Clean up temporary file and database entry on task failure
+            if temp_file_path.exists():
+                temp_file_path.unlink()
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM file_metadata WHERE file_id = %s", (file_id,))
+                conn.commit()
+            raise HTTPException(status_code=500, detail=f"Failed to queue processing task: {str(e)}")
+
         return {
             "status": "success",
             "file_id": file_id,
@@ -622,7 +685,7 @@ async def process_file(
         }
     except Exception as e:
         logger.error(f"File processing failed for {file.filename}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"File processing failed: {str(e)}")
     finally:
         conn.close()
 

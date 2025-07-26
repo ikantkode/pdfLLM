@@ -27,8 +27,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
-FASTAPI_HOST = "rag-service"
-FASTAPI_PORT = "8000"
+FASTAPI_HOST = os.getenv("FASTAPI_HOST", "rag-service")  # Fallback to rag-service if not set
+FASTAPI_PORT = os.getenv("FASTAPI_PORT", "8000")  # Fallback to 8000 if not set
+BASE_URL = f"http://{FASTAPI_HOST}:{FASTAPI_PORT}"
 
 class SessionState:
     def __init__(self):
@@ -45,6 +46,8 @@ class SessionState:
             st.session_state.selected_docs = []
         if "upload_key" not in st.session_state:
             st.session_state.upload_key = 0
+        if "pending_files" not in st.session_state:
+            st.session_state.pending_files = {}  # Track pending files for status polling
 
 session_state = SessionState()
 
@@ -72,7 +75,24 @@ def create_new_chat():
     st.rerun()
 
 def get_file_preview_url(file_id: str, user_id: str) -> Optional[str]:
-    return f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/preview/{file_id}?user_id={user_id}&X-API-Key={settings.openai_api_key}"
+    return f"{BASE_URL}/preview/{file_id}?user_id={user_id}&X-API-Key={settings.openai_api_key}"
+
+def check_file_status(user_id: str, file_id: str) -> Dict:
+    try:
+        response = requests.get(
+            f"{BASE_URL}/documents?user_id={user_id}",
+            headers={"X-API-Key": settings.openai_api_key}
+        )
+        if response.status_code == 200:
+            documents = response.json().get("documents", [])
+            for doc in documents:
+                if doc["file_id"] == file_id:
+                    return {"file_id": file_id, "status": doc["status"], "filename": doc["filename"]}
+        logger.error(f"Failed to check status for file_id {file_id}: {response.status_code} - {response.text}")
+        return {"file_id": file_id, "status": "unknown", "filename": "Unknown"}
+    except Exception as e:
+        logger.error(f"Error checking file status for {file_id}: {str(e)}")
+        return {"file_id": file_id, "status": "error", "filename": "Unknown", "error": str(e)}
 
 def render_document_management(user_id: str):
     st.sidebar.title("Document Management")
@@ -96,121 +116,174 @@ def render_document_management(user_id: str):
             st.session_state.upload_trigger = True
             success_count = 0
             error_messages = []
-            with st.spinner("Processing files..."):
+            pending_files = []
+            with st.spinner("Uploading files..."):
                 for uploaded_file in uploaded_files:
                     if uploaded_file.size > settings.max_document_size:
-                        error_messages.append(f"File {uploaded_file.name} exceeds size limit")
+                        error_msg = f"File {uploaded_file.name} size {uploaded_file.size/(1024*1024):.2f}MB exceeds limit {settings.max_document_size/(1024*1024):.2f}MB"
+                        logger.error(error_msg)
+                        error_messages.append(error_msg)
                         continue
 
                     files = {"file": (uploaded_file.name, uploaded_file, uploaded_file.type)}
                     data = {"user_id": user_id, "category": category if category != "other" else None}
                     try:
                         response = requests.post(
-                            f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/process_file",
+                            f"{BASE_URL}/process_file",
                             files=files,
                             data=data,
-                            headers={"X-API-Key": settings.openai_api_key}
+                            headers={"X-API-Key": settings.openai_api_key},
+                            timeout=30
                         )
                         if response.status_code == 200:
+                            result = response.json()
+                            pending_files.append({
+                                "file_id": result["file_id"],
+                                "filename": result["filename"],
+                                "status": "pending"
+                            })
                             success_count += 1
                         else:
-                            error_messages.append(f"Upload failed for {uploaded_file.name}")
+                            error_msg = f"Upload failed for {uploaded_file.name}: {response.status_code} - {response.text}"
+                            logger.error(error_msg)
+                            error_messages.append(error_msg)
+                    except requests.exceptions.RequestException as e:
+                        error_msg = f"Network error uploading {uploaded_file.name}: {str(e)}"
+                        logger.error(error_msg)
+                        error_messages.append(error_msg)
                     except Exception as e:
-                        error_messages.append(f"Upload error: {str(e)}")
+                        error_msg = f"Unexpected error uploading {uploaded_file.name}: {str(e)}"
+                        logger.error(error_msg)
+                        error_messages.append(error_msg)
 
             if success_count > 0:
-                st.success(f"Uploaded {success_count} file(s)")
+                st.success(f"Uploaded {success_count} file(s). Processing in background...")
+                st.session_state.pending_files.update({f["file_id"]: f for f in pending_files})
                 st.session_state.upload_key += 1
-                st.rerun()
             if error_messages:
                 for error in error_messages:
                     st.error(error)
             st.session_state.upload_trigger = False
 
+    # Poll status for pending files
+    if st.session_state.pending_files:
+        with st.sidebar.expander("Processing Status"):
+            for file_id, file_info in list(st.session_state.pending_files.items()):
+                status_info = check_file_status(user_id, file_id)
+                st.write(f"{file_info['filename']}: {status_info['status'].capitalize()}")
+                if status_info["status"] in ["processed", "failed"]:
+                    del st.session_state.pending_files[file_id]
+                if status_info["status"] == "error":
+                    st.error(f"Error checking status for {file_info['filename']}: {status_info.get('error', 'Unknown error')}")
+            if st.session_state.pending_files:
+                st.button("Refresh Status", key="refresh_status", on_click=st.rerun)
+
     st.sidebar.markdown("### Uploaded Documents")
     try:
         with st.spinner("Loading documents..."):
             response = requests.get(
-                f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/documents?user_id={user_id}",
-                headers={"X-API-Key": settings.openai_api_key}
+                f"{BASE_URL}/documents?user_id={user_id}",
+                headers={"X-API-Key": settings.openai_api_key},
+                timeout=30
             )
+            if response.status_code == 200:
+                documents = response.json().get("documents", [])
+                st.session_state.file_metadata = documents
+                if documents:
+                    col1, col2 = st.sidebar.columns([1, 1])
+                    with col1:
+                        if st.button("Select All"):
+                            handle_select_all()
+                    with col2:
+                        if st.button("Clear All"):
+                            handle_clear_all()
 
-        if response.status_code == 200:
-            documents = response.json().get("documents", [])
-            st.session_state.file_metadata = documents
-            if documents:
-                col1, col2 = st.sidebar.columns([1, 1])
-                with col1:
-                    if st.button("Select All"):
-                        handle_select_all()
-                with col2:
-                    if st.button("Clear All"):
-                        handle_clear_all()
-
-                for file in documents:
-                    with st.sidebar.container():
-                        cols = st.columns([3, 1, 1])
-                        with cols[0]:
-                            checkbox_key = f"doc_select_{file['file_id']}"
-                            if st.checkbox(
-                                f"{file['filename']} ({file['status']})",
-                                key=checkbox_key,
-                                value=file['file_id'] in st.session_state.selected_docs,
-                                on_change=update_selected_docs
-                            ):
-                                pass
-                            st.caption(f"{file['file_type']} - {file['upload_date']} - {file['size']/1024:.1f} KB")
-                            category = st.selectbox(
-                                "Category",
-                                ["submittals", "payrolls", "bank_statements", "other"],
-                                index=["submittals", "payrolls", "bank_statements", "other"].index(file['category'] or "other"),
-                                key=f"category_{file['file_id']}"
-                            )
-                            if category != file['category']:
-                                try:
-                                    response = requests.patch(
-                                        f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/documents/{file['file_id']}",
-                                        data={"user_id": user_id, "category": category if category != "other" else None},
-                                        headers={"X-API-Key": settings.openai_api_key}
-                                    )
-                                    if response.status_code == 200:
-                                        file['category'] = category
-                                        st.rerun()
-                                    else:
-                                        st.error(f"Failed to update category: {response.text}")
-                                except Exception as e:
-                                    st.error(f"Error updating category: {str(e)}")
-                        with cols[1]:
-                            preview_url = get_file_preview_url(file['file_id'], user_id)
-                            if preview_url:
-                                st.markdown(
-                                    f'<a href="{preview_url}" target="_blank" style="text-decoration: none;">🔍</a>',
-                                    unsafe_allow_html=True
+                    for file in documents:
+                        with st.sidebar.container():
+                            cols = st.columns([3, 1, 1])
+                            with cols[0]:
+                                checkbox_key = f"doc_select_{file['file_id']}"
+                                if st.checkbox(
+                                    f"{file['filename']} ({file['status']})",
+                                    key=checkbox_key,
+                                    value=file['file_id'] in st.session_state.selected_docs,
+                                    on_change=update_selected_docs
+                                ):
+                                    pass
+                                st.caption(f"{file['file_type']} - {file['upload_date']} - {file['size']/1024:.1f} KB")
+                                category = st.selectbox(
+                                    "Category",
+                                    ["submittals", "payrolls", "bank_statements", "other"],
+                                    index=["submittals", "payrolls", "bank_statements", "other"].index(file['category'] or "other"),
+                                    key=f"category_{file['file_id']}"
                                 )
-                        with cols[2]:
-                            if st.button("🗑️", key=f"delete_{file['file_id']}"):
-                                try:
-                                    with st.spinner("Deleting..."):
-                                        response = requests.delete(
-                                            f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/documents/{file['file_id']}?user_id={user_id}",
-                                            headers={"X-API-Key": settings.openai_api_key}
+                                if category != file['category']:
+                                    try:
+                                        response = requests.patch(
+                                            f"{BASE_URL}/documents/{file['file_id']}",
+                                            data={"user_id": user_id, "category": category if category != "other" else None},
+                                            headers={"X-API-Key": settings.openai_api_key},
+                                            timeout=30
                                         )
-                                    if response.status_code == 200:
-                                        st.session_state.file_metadata = [
-                                            f for f in st.session_state.file_metadata
-                                            if f['file_id'] != file['file_id']
-                                        ]
-                                        if file['file_id'] in st.session_state.selected_docs:
-                                            st.session_state.selected_docs.remove(file['file_id'])
-                                        st.rerun()
-                                except Exception as e:
-                                    st.error(f"Delete error: {str(e)}")
+                                        if response.status_code == 200:
+                                            file['category'] = category
+                                            st.rerun()
+                                        else:
+                                            error_msg = f"Failed to update category for {file['filename']}: {response.status_code} - {response.text}"
+                                            logger.error(error_msg)
+                                            st.error(error_msg)
+                                    except Exception as e:
+                                        error_msg = f"Error updating category for {file['filename']}: {str(e)}"
+                                        logger.error(error_msg)
+                                        st.error(error_msg)
+                            with cols[1]:
+                                preview_url = get_file_preview_url(file['file_id'], user_id)
+                                if preview_url:
+                                    st.markdown(
+                                        f'<a href="{preview_url}" target="_blank" style="text-decoration: none;">🔍</a>',
+                                        unsafe_allow_html=True
+                                    )
+                            with cols[2]:
+                                if st.button("🗑️", key=f"delete_{file['file_id']}"):
+                                    try:
+                                        with st.spinner("Deleting..."):
+                                            response = requests.delete(
+                                                f"{BASE_URL}/documents/{file['file_id']}?user_id={user_id}",
+                                                headers={"X-API-Key": settings.openai_api_key},
+                                                timeout=30
+                                            )
+                                            if response.status_code == 200:
+                                                st.session_state.file_metadata = [
+                                                    f for f in st.session_state.file_metadata
+                                                    if f['file_id'] != file['file_id']
+                                                ]
+                                                if file['file_id'] in st.session_state.selected_docs:
+                                                    st.session_state.selected_docs.remove(file['file_id'])
+                                                if file['file_id'] in st.session_state.pending_files:
+                                                    del st.session_state.pending_files[file['file_id']]
+                                                st.rerun()
+                                            else:
+                                                error_msg = f"Failed to delete {file['filename']}: {response.status_code} - {response.text}"
+                                                logger.error(error_msg)
+                                                st.error(error_msg)
+                                    except Exception as e:
+                                        error_msg = f"Error deleting {file['filename']}: {str(e)}"
+                                        logger.error(error_msg)
+                                        st.error(error_msg)
+                else:
+                    st.sidebar.info("No documents uploaded yet.")
             else:
-                st.sidebar.info("No documents uploaded yet.")
-        else:
-            st.sidebar.error(f"Error loading documents: {response.text}")
+                error_msg = f"Error loading documents: {response.status_code} - {response.text}"
+                logger.error(error_msg)
+                st.sidebar.error(error_msg)
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Network error loading documents: {str(e)}"
+        logger.error(error_msg)
+        st.sidebar.error(error_msg)
     except Exception as e:
-        st.sidebar.error(f"Error loading documents: {str(e)}")
+        error_msg = f"Unexpected error loading documents: {str(e)}"
+        logger.error(error_msg)
+        st.sidebar.error(error_msg)
 
 def render_prompt_management(user_id: str):
     st.sidebar.title("Prompt Management")
@@ -223,23 +296,29 @@ def render_prompt_management(user_id: str):
             else:
                 try:
                     response = requests.post(
-                        f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/prompts",
+                        f"{BASE_URL}/prompts",
                         data={"category": category, "prompt": prompt_text, "user_id": user_id},
-                        headers={"X-API-Key": settings.openai_api_key}
+                        headers={"X-API-Key": settings.openai_api_key},
+                        timeout=30
                     )
                     if response.status_code == 200:
                         st.success("Prompt saved successfully")
                         st.rerun()
                     else:
-                        st.error(f"Failed to save prompt: {response.text}")
+                        error_msg = f"Failed to save prompt: {response.status_code} - {response.text}"
+                        logger.error(error_msg)
+                        st.error(error_msg)
                 except Exception as e:
-                    st.error(f"Error saving prompt: {str(e)}")
+                    error_msg = f"Error saving prompt: {str(e)}"
+                    logger.error(error_msg)
+                    st.error(error_msg)
 
     st.sidebar.markdown("### Existing Prompts")
     try:
         response = requests.get(
-            f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/prompts?user_id={user_id}",
-            headers={"X-API-Key": settings.openai_api_key}
+            f"{BASE_URL}/prompts?user_id={user_id}",
+            headers={"X-API-Key": settings.openai_api_key},
+            timeout=30
         )
         if response.status_code == 200:
             prompts = response.json().get("prompts", [])
@@ -251,20 +330,27 @@ def render_prompt_management(user_id: str):
                     if st.button("Delete", key=f"delete_prompt_{prompt['id']}"):
                         try:
                             response = requests.delete(
-                                f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/prompts/{prompt['category']}?user_id={user_id}",
-                                headers={"X-API-Key": settings.openai_api_key}
+                                f"{BASE_URL}/prompts/{prompt['category']}?user_id={user_id}",
+                                headers={"X-API-Key": settings.openai_api_key},
+                                timeout=30
                             )
                             if response.status_code == 200:
                                 st.success(f"Prompt {prompt['category']} deleted")
                                 st.rerun()
                             else:
-                                st.error(f"Failed to delete prompt: {response.text}")
+                                error_msg = f"Failed to delete prompt: {response.status_code} - {response.text}"
+                                logger.error(error_msg)
+                                st.error(error_msg)
                         except Exception as e:
-                            st.error(f"Error deleting prompt: {str(e)}")
+                            error_msg = f"Error deleting prompt: {str(e)}"
+                            logger.error(error_msg)
+                            st.error(error_msg)
         else:
             st.sidebar.info("No prompts defined yet.")
     except Exception as e:
-        st.sidebar.error(f"Error loading prompts: {str(e)}")
+        error_msg = f"Error loading prompts: {str(e)}"
+        logger.error(error_msg)
+        st.sidebar.error(error_msg)
 
 def render_chat_sessions(user_id: str):
     st.sidebar.title("Chat Sessions")
@@ -273,8 +359,9 @@ def render_chat_sessions(user_id: str):
 
     try:
         response = requests.get(
-            f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/chat_sessions?user_id={user_id}",
-            headers={"X-API-Key": settings.openai_api_key}
+            f"{BASE_URL}/chat_sessions?user_id={user_id}",
+            headers={"X-API-Key": settings.openai_api_key},
+            timeout=30
         )
         if response.status_code == 200:
             sessions = response.json().get("chat_sessions", [])
@@ -297,20 +384,31 @@ def render_chat_sessions(user_id: str):
                     if st.button("🗑️", key=f"delete_chat_{chat_id}"):
                         try:
                             response = requests.delete(
-                                f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/chat_sessions/{chat_id}?user_id={user_id}",
-                                headers={"X-API-Key": settings.openai_api_key}
+                                f"{BASE_URL}/chat_sessions/{chat_id}?user_id={user_id}",
+                                headers={"X-API-Key": settings.openai_api_key},
+                                timeout=30
                             )
                             if response.status_code == 200:
                                 if st.session_state.current_chat_id == chat_id:
                                     st.session_state.current_chat_id = None
                                 del st.session_state.chat_sessions[chat_id]
                                 st.rerun()
+                            else:
+                                error_msg = f"Failed to delete chat: {response.status_code} - {response.text}"
+                                logger.error(error_msg)
+                                st.error(error_msg)
                         except Exception as e:
-                            st.error(f"Error deleting chat: {str(e)}")
+                            error_msg = f"Error deleting chat: {str(e)}"
+                            logger.error(error_msg)
+                            st.error(error_msg)
         else:
-            st.sidebar.error(f"Error loading chat sessions: {response.text}")
+            error_msg = f"Error loading chat sessions: {response.status_code} - {response.text}"
+            logger.error(error_msg)
+            st.sidebar.error(error_msg)
     except Exception as e:
-        st.sidebar.error(f"Error loading chat sessions: {str(e)}")
+        error_msg = f"Error loading chat sessions: {str(e)}"
+        logger.error(error_msg)
+        st.sidebar.error(error_msg)
 
 def render_entity_graph(sources: List[Dict]):
     if not sources:
@@ -390,9 +488,10 @@ def main():
                     "category": category
                 }
                 response = requests.post(
-                    f"http://{FASTAPI_HOST}:{FASTAPI_PORT}/chat",
+                    f"{BASE_URL}/chat",
                     data=data,
-                    headers={"X-API-Key": settings.openai_api_key}
+                    headers={"X-API-Key": settings.openai_api_key},
+                    timeout=30
                 )
                 if response.status_code == 200:
                     result = response.json()
@@ -419,9 +518,17 @@ def main():
                     )
                     st.rerun()
                 else:
-                    st.error(f"Query failed: {response.text}")
+                    error_msg = f"Query failed: {response.status_code} - {response.text}"
+                    logger.error(error_msg)
+                    st.error(error_msg)
+        except requests.exceptions.RequestException as e:
+            error_msg = f"Network error processing query: {str(e)}"
+            logger.error(error_msg)
+            st.error(error_msg)
         except Exception as e:
-            st.error(f"Query error: {str(e)}")
+            error_msg = f"Unexpected error processing query: {str(e)}"
+            logger.error(error_msg)
+            st.error(error_msg)
 
 if __name__ == "__main__":
     main()
