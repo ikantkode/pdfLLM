@@ -2,6 +2,16 @@
 
 `pdfLLM` is a Retrieval-Augmented Generation (RAG) microservice that processes documents to allow querying, summarization, and chat-like interaction. It integrates document parsing, knowledge graph construction, semantic search, and LLM-based generation to offer advanced document intelligence.
 
+## Change Log
+
+- As of today, 07/27/2025, the app is now able to asynchronously upload/process multiple files. (Tested up to 5 more to be tested tomorrow).
+- Introducing "Categories" - you are now able to create categories for your application, and are able to create prompts custom to that category. 
+- Introducing "Master Chat" and "Category Chat" - you are able to isolate chats to specific categories, and or initiate chats with the entirety of your "Knowledge Base"; although orchestration chain is still to be implemented, it "works".
+- Postgres is now used instead of state.json to manage and cache your sessions. Its all good baby baby.
+- Postgres docker conatiner runs on a different than usual port so if you have your own postgre installation, it won't mess with it.
+- Celery for the win. Processing is blazing fast now. Kinda surprised tbh.
+- OCR improvements are coming. I can honestly work on this for the rest of my life and there would still be improvements. So help. pls. {insert kevin hart stage meme here}
+
 ## Context Size of Models (Total, Input and Output)
 
 Using quantized models via Ollama will *severely* output the level of results you want. Context windows are therefore undetereminable for everyone's setup, but I can safely recommend OpenAI's gpt-4o-mini and text-embedding-3-small models as so cost effective that it is almost a no-brainer to use. 
