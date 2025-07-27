@@ -7,6 +7,7 @@ from qdrant_client.http import models
 from qdrant_client.http.models import PointStruct, Filter, FieldCondition, MatchValue
 
 from app.config import settings
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ logger = logging.getLogger(__name__)
 class QdrantHandler:
     def __init__(self):
         try:
-            self.client = QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
+            self.client = QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port, timeout=30)
             self.collection_name = "pdfllm_collection"
             self.vector_size = 1024
             self._initialize_collection()
@@ -48,10 +49,13 @@ class QdrantHandler:
                     field_schema="keyword"
                 )
                 logger.info("Created payload indexes")
+            else:
+                logger.info(f"Collection {self.collection_name} already exists")
         except Exception as e:
             logger.error(f"Failed to initialize collection: {str(e)}")
             raise
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10), reraise=True)
     def store_chunk(
         self,
         document_id: str,
@@ -72,6 +76,12 @@ class QdrantHandler:
             else:
                 point_id = uuid.UUID(chunk_id)
 
+            # Validate metadata to ensure it's serializable
+            if not isinstance(metadata.get("entities", []), list) or not all(isinstance(e, (str, dict)) for e in metadata["entities"]):
+                raise ValueError("Entities must be a list of strings or dicts")
+            if not isinstance(metadata.get("relationships", []), list) or not all(isinstance(r, dict) for r in metadata["relationships"]):
+                raise ValueError("Relationships must be a list of dicts")
+
             payload = {
                 "document_id": document_id,
                 "content": chunk_text,
@@ -81,11 +91,11 @@ class QdrantHandler:
             self.client.upsert(
                 collection_name=self.collection_name,
                 points=[
-                    {
-                        "id": str(point_id),
-                        "vector": embedding,
-                        "payload": payload
-                    }
+                    PointStruct(
+                        id=str(point_id),
+                        vector=embedding,
+                        payload=payload
+                    )
                 ],
                 wait=True
             )
@@ -94,68 +104,7 @@ class QdrantHandler:
             logger.error(f"Failed to store chunk {chunk_id}: {str(e)}")
             raise
 
-    async def save_chunk(self, chunk: Dict, user_id: str):
-        """Save a chunk to Qdrant"""
-        try:
-            point = PointStruct(
-                id=str(uuid.uuid4()),
-                vector=chunk['embedding'],
-                payload={
-                    "user_id": user_id,
-                    "document_id": chunk['document_id'],
-                    "content": chunk['content'],
-                    "chunk_index": chunk['chunk_index'],
-                    "parent_section": chunk['parent_section'],
-                    "entities": chunk['entities'],
-                    "relationships": chunk['relationships']
-                }
-            )
-            self.client.upsert(
-                collection_name=self.collection_name,
-                points=[point],
-                wait=True
-            )
-            logger.debug(f"Saved chunk {chunk['chunk_index']} for document {chunk['document_id']}")
-        except Exception as e:
-            logger.error(f"Failed to save chunk: {str(e)}")
-            raise
-
-    async def search_entities(self, entities: List[str], user_id: str, file_ids: Optional[List[str]] = None, limit: int = 5) -> List[Any]:
-        """Search for chunks containing specific entities"""
-        try:
-            results = []
-            for entity in entities:
-                filter_conditions = [
-                    FieldCondition(
-                        key="entities",
-                        match=MatchValue(value=entity)
-                    ),
-                    FieldCondition(
-                        key="user_id",
-                        match=MatchValue(value=user_id)
-                    )
-                ]
-                if file_ids:
-                    filter_conditions.append(
-                        FieldCondition(
-                            key="document_id",
-                            match=MatchValue(value=file_ids, match_any=True)
-                        )
-                    )
-
-                search_results = self.client.search(
-                    collection_name=self.collection_name,
-                    query_filter=Filter(must=filter_conditions),
-                    limit=limit,
-                    with_vectors=False
-                )
-                results.extend(search_results)
-            return results
-        except Exception as e:
-            logger.error(f"Entity search failed: {str(e)}")
-            return []
-
-    async def delete_by_document_id(self, document_id: str):
+    def delete_by_document_id(self, document_id: str):
         """Delete all chunks associated with a document ID"""
         try:
             self.client.delete(
@@ -173,4 +122,33 @@ class QdrantHandler:
             logger.info(f"Deleted all chunks for document {document_id}")
         except Exception as e:
             logger.error(f"Failed to delete chunks for document {document_id}: {str(e)}")
+            raise
+
+    def update_metadata(self, document_id: str, new_metadata: dict):
+        """Update metadata for all chunks of a document"""
+        try:
+            points, _ = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="document_id",
+                            match=MatchValue(value=document_id)
+                        )
+                    ]
+                ),
+                with_payload=True
+            )
+            for point in points:
+                updated_payload = point.payload.copy()
+                updated_payload.update(new_metadata)
+                self.client.set_payload(
+                    collection_name=self.collection_name,
+                    payload=updated_payload,
+                    points=[point.id],
+                    wait=True
+                )
+            logger.info(f"Updated metadata for document {document_id}")
+        except Exception as e:
+            logger.error(f"Failed to update metadata for document {document_id}: {str(e)}")
             raise

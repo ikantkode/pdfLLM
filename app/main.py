@@ -27,6 +27,7 @@ from app.utils.text_processor import TextProcessor
 from app.utils.ocr_processor import OCRProcessor
 from app.converters import image_converter, doc_converter, excel_converter, txt_converter
 from app.celery_app import celery_app
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue, MatchAny
 
 # Initialize tokenizer
 tokenizer = tiktoken.get_encoding("cl100k_base")
@@ -66,7 +67,6 @@ api_key_header = APIKeyHeader(name="X-API-Key")
 
 async def validate_api_key(api_key: str = Depends(api_key_header)):
     if settings.openai_enabled and api_key != settings.openai_api_key:
-        logger.error(f"Invalid API key provided: {api_key[:4]}...")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API Key"
@@ -124,19 +124,13 @@ Path(settings.temp_upload_dir).mkdir(parents=True, exist_ok=True)
 
 # PostgreSQL connection
 def get_db_connection():
-    try:
-        conn = psycopg2.connect(
-            host=settings.postgres_host,
-            port=settings.postgres_port,
-            database=settings.postgres_db,
-            user=settings.postgres_user,
-            password=settings.postgres_password
-        )
-        logger.debug("PostgreSQL connection established")
-        return conn
-    except Exception as e:
-        logger.error(f"Failed to connect to PostgreSQL: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Database connection failed: {str(e)}")
+    return psycopg2.connect(
+        host=settings.postgres_host,
+        port=settings.postgres_port,
+        database=settings.postgres_db,
+        user=settings.postgres_user,
+        password=settings.postgres_password
+    )
 
 # Models
 class FileMetadata(BaseModel):
@@ -456,9 +450,9 @@ def rank_results(vector_results: List, limit: int, file_ids: Optional[List[str]]
             if doc_id in file_ids and doc_id not in seen_docs:
                 final_results.append(result)
                 seen_docs.add(doc_id)
-        remaining = [r for r in sorted_results if r not in final_results]
-        final_results.extend(remaining[:limit - len(final_results)])
-        return final_results[:limit]
+            remaining = [r for r in sorted_results if r not in final_results]
+            final_results.extend(remaining[:limit - len(final_results)])
+            return final_results[:limit]
     return sorted_results[:limit]
 
 def clean_query(query: str) -> str:
@@ -580,104 +574,48 @@ async def process_file(
     api_key: str = Depends(validate_api_key)
 ):
     validate_provider_settings()
-    
-    # Validate file extension
-    file_ext = os.path.splitext(file.filename)[1].lower()
-    supported_extensions = (
-        settings.supported_extensions['images'] +
-        settings.supported_extensions['documents'] +
-        settings.supported_extensions['spreadsheets'] +
-        settings.supported_extensions['text'] +
-        settings.supported_extensions['pdfs']
-    )
-    if file_ext not in supported_extensions:
-        logger.error(f"Unsupported file extension {file_ext} for file {file.filename}")
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type: {file_ext}. Supported types: {', '.join(supported_extensions)}"
-        )
-
-    # Validate file size
     if file.size > settings.max_document_size:
-        logger.error(f"File {file.filename} size {file.size} exceeds limit {settings.max_document_size}")
         raise HTTPException(
             status_code=400,
-            detail=f"File size {file.size/(1024*1024):.2f}MB exceeds {settings.max_document_size/(1024*1024):.2f}MB limit"
+            detail=f"File size exceeds {settings.max_document_size//(1024*1024)}MB limit"
         )
 
     conn = get_db_connection()
     try:
-        # Check for existing file
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT file_id FROM file_metadata WHERE filename = %s AND user_id = %s",
                 (file.filename, user_id)
             )
-            existing_file = cur.fetchone()
-            if existing_file:
-                logger.info(f"File {file.filename} already exists for user {user_id} with file_id {existing_file[0]}")
+            if cur.fetchone():
+                logger.info(f"File {file.filename} already exists for user {user_id}")
                 return {
                     "status": "success",
-                    "file_id": existing_file[0],
+                    "file_id": cur.fetchone()[0],
                     "filename": file.filename
                 }
 
         file_id = str(uuid.uuid4())
-        try:
-            file_content = await file.read()
-            if not file_content:
-                logger.error(f"Empty file content for {file.filename}")
-                raise HTTPException(status_code=400, detail="Empty file content")
-        except Exception as e:
-            logger.error(f"Failed to read file {file.filename}: {str(e)}")
-            raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
-
-        # Save file to temp_upload_dir
-        temp_file_path = Path(settings.temp_upload_dir) / f"{file_id}{file_ext}"
-        try:
-            with open(temp_file_path, "wb") as f:
-                f.write(file_content)
-            logger.debug(f"Saved file {file.filename} to {temp_file_path}")
-        except Exception as e:
-            logger.error(f"Failed to save file {file.filename} to {temp_file_path}: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Failed to save file to disk: {str(e)}")
-
+        file_content = await file.read()
+        file_ext = os.path.splitext(file.filename)[1].lower()
         checksum = hashlib.md5(file_content).hexdigest()
 
-        # Insert metadata into database
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO file_metadata (file_id, filename, file_type, content, user_id, size, checksum, category, status, upload_date)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (file_id, file.filename, file_ext, file_content, user_id, file.size, checksum, category, "pending", datetime.datetime.now())
-                )
-                conn.commit()
-                logger.info(f"Inserted metadata for file {file.filename} (ID: {file_id})")
-        except psycopg2.Error as e:
-            logger.error(f"Database error inserting metadata for {file.filename}: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-
-        # Queue Celery task
-        try:
-            task = celery_app.send_task(
-                "app.celery_app.process_ocr",
-                args=[file_id, user_id, file_ext, category],
-                kwargs={"filename": file.filename}
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO file_metadata (file_id, filename, file_type, upload_date, content, user_id, size, checksum, category, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (file_id, file.filename, file_ext, datetime.datetime.now(), file_content, user_id, file.size, checksum, category, "pending")
             )
-            logger.info(f"Queued OCR processing for file: {file.filename} (ID: {file_id}, Task ID: {task.id})")
-        except Exception as e:
-            logger.error(f"Failed to queue Celery task for {file.filename}: {str(e)}")
-            # Clean up temporary file and database entry on task failure
-            if temp_file_path.exists():
-                temp_file_path.unlink()
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM file_metadata WHERE file_id = %s", (file_id,))
-                conn.commit()
-            raise HTTPException(status_code=500, detail=f"Failed to queue processing task: {str(e)}")
+            conn.commit()
 
+        celery_app.send_task(
+            "app.celery_app.process_ocr",
+            args=[file_id, user_id, file_ext, category],
+            kwargs={"filename": file.filename}
+        )
+        logger.info(f"Queued OCR processing for file: {file.filename} (ID: {file_id})")
         return {
             "status": "success",
             "file_id": file_id,
@@ -685,7 +623,7 @@ async def process_file(
         }
     except Exception as e:
         logger.error(f"File processing failed for {file.filename}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"File processing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         conn.close()
 
@@ -708,11 +646,11 @@ async def chat_with_documents(
                 vector_results = []
                 for chunk in query_chunks:
                     embedding = generate_embeddings_batch([chunk])[0]
-                    query_filter = {"must": [{"key": "user_id", "match": {"value": user_id}}]}
+                    query_filter = Filter(must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))])
                     if file_ids:
-                        query_filter["must"].append({"key": "document_id", "match": {"value": file_ids}})
+                        query_filter.must.append(FieldCondition(key="document_id", match=MatchAny(any=file_ids)))
                     if category != "all":
-                        query_filter["must"].append({"key": "category", "match": {"value": category}})
+                        query_filter.must.append(FieldCondition(key="category", match=MatchValue(value=category)))
                     results = qdrant_handler.client.search(
                         collection_name=settings.qdrant_collection,
                         query_vector=embedding,
@@ -737,7 +675,7 @@ async def chat_with_documents(
                     }
 
                 context = await build_chat_context(search_results)
-                response = await generate_coherent_response(cleaned_query, context, category, user_id)
+                response = generate_coherent_response(cleaned_query, context, category, user_id)
 
                 chat_id = chat_id or str(uuid.uuid4())
                 cur.execute(
@@ -830,7 +768,7 @@ async def delete_document(
     try:
         conn = get_db_connection()
         try:
-            await qdrant_handler.delete_by_document_id(file_id)
+            qdrant_handler.delete_by_document_id(file_id)
             with conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM file_metadata WHERE file_id = %s AND user_id = %s",
@@ -865,8 +803,7 @@ async def update_document_category(
                 if cur.rowcount == 0:
                     raise HTTPException(status_code=404, detail="File not found")
                 conn.commit()
-                # Update Qdrant metadata
-                await qdrant_handler.update_metadata(file_id, {"category": category})
+                qdrant_handler.update_metadata(file_id, {"category": category})
             logger.info(f"Updated category for document {file_id} to {category}")
             return {"status": "success", "file_id": file_id, "category": category}
         finally:

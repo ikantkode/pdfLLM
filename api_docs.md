@@ -1,255 +1,128 @@
+# API Documentation
 
-# pdfLLM API Documentation
+## Overview
+This is a Retrieval-Augmented Generation (RAG) microservice built with FastAPI. It supports file uploading and processing (with OCR), document querying via chat, prompt management, and session handling. Authentication uses an API key header (X-API-Key). The service is available at /api/docs (Swagger) and /api/redoc (ReDoc) for interactive docs.
 
-The `pdfLLM` FastAPI backend provides RESTful endpoints to upload, search, chat with, and manage documents. This API combines semantic and graph-based retrieval to deliver intelligent answers from document context.
+All endpoints require the X-API-Key header for validation. Responses are JSON unless specified otherwise. Errors return HTTP status codes with {"detail": "message"}.
 
-> 🛡 All endpoints require:
-> - `X-API-Key` header (e.g., `X-API-Key: sk-sample1234567890`)
-> - `user_id` (as form/query param)
+## Endpoints
 
----
+### POST /process_file
+**Description**: Upload and queue a file for processing (OCR, embedding, storage in Qdrant).  
+**Parameters** (multipart/form-data):  
+- file: UploadFile (required) - The file to process.  
+- user_id: str (required) - User identifier.  
+- category: str (optional) - Document category (e.g., "payrolls").  
+**Headers**: X-API-Key (required).  
+**Response**: 200 OK - {"status": "success", "file_id": str, "filename": str}.  
+**Errors**: 400 (file too large or invalid config), 401 (invalid key), 500 (processing error).
 
-## 🔄 `POST /process_file`
+### POST /chat
+**Description**: Query documents with a natural language question, retrieving and generating a response using RAG.  
+**Parameters** (multipart/form-data):  
+- query: str (required) - The user query.  
+- user_id: str (required) - User identifier.  
+- file_ids: List[str] (optional) - Specific document IDs to query.  
+- chat_id: str (optional) - Existing chat session ID.  
+- category: str (optional, default="all") - Filter by category.  
+**Headers**: X-API-Key (required).  
+**Response**: 200 OK - {"response": str, "chat_id": str, "sources": List[SearchResult]}.  
+**Errors**: 401 (invalid key), 500 (generation error).
 
-**Description**: Upload and convert a document. Generates embeddings and stores metadata + vectors.
+### GET /documents
+**Description**: List uploaded documents for a user.  
+**Query Parameters**:  
+- user_id: str (required) - User identifier.  
+**Headers**: X-API-Key (required).  
+**Response**: 200 OK - {"status": "success", "documents": List[Dict] (with file_id, filename, etc.)}.  
+**Errors**: 401 (invalid key), 500 (DB error).
 
-**Headers**:
-- `X-API-Key`: Your API key
-- `Content-Type`: `multipart/form-data`
+### DELETE /documents/{file_id}
+**Description**: Delete a document and its chunks from Qdrant.  
+**Path Parameters**: file_id: str (required).  
+**Query Parameters**: user_id: str (required).  
+**Headers**: X-API-Key (required).  
+**Response**: 200 OK - {"status": "success", "file_id": str}.  
+**Errors**: 401 (invalid key), 404 (not found), 500 (deletion error).
 
-**Form Fields**:
-- `file`: (required) The document to upload
-- `user_id`: (required) Your user/session ID
+### PATCH /documents/{file_id}
+**Description**: Update a document's category.  
+**Path Parameters**: file_id: str (required).  
+**Parameters** (multipart/form-data):  
+- category: str (required) - New category.  
+**Query Parameters**: user_id: str (required).  
+**Headers**: X-API-Key (required).  
+**Response**: 200 OK - {"status": "success", "file_id": str, "category": str}.  
+**Errors**: 401 (invalid key), 404 (not found), 500 (update error).
 
-**Example Request**:
-```bash
-curl -X POST "http://localhost:8000/process_file" \
-  -H "X-API-Key: sk-sample1234567890" \
-  -F "file=@document.pdf" \
-  -F "user_id=test_user"
-```
+### POST /prompts
+**Description**: Create or update a system prompt for a category.  
+**Parameters** (multipart/form-data):  
+- category: str (required) - Prompt category.  
+- prompt: str (required) - Prompt text.  
+- user_id: str (required) - User identifier.  
+**Headers**: X-API-Key (required).  
+**Response**: 200 OK - {"status": "success", "prompt": Dict (with id, category, etc.)}.  
+**Errors**: 400 (prompt too long), 401 (invalid key), 500 (DB error).
 
-**Success Response**:
-```json
-{
-  "status": "success",
-  "file_id": "c4c82b21-469f-403f-bed7-87ce5b167a8d",
-  "filename": "document.pdf"
-}
-```
+### GET /prompts
+**Description**: List all prompts for a user.  
+**Query Parameters**: user_id: str (required).  
+**Headers**: X-API-Key (required).  
+**Response**: 200 OK - {"status": "success", "prompts": List[Dict]}.  
+**Errors**: 401 (invalid key), 500 (DB error).
 
-## 🔍 `POST /search`
+### GET /prompts/{category}
+**Description**: Get a specific prompt by category.  
+**Path Parameters**: category: str (required).  
+**Query Parameters**: user_id: str (required).  
+**Headers**: X-API-Key (required).  
+**Response**: 200 OK - {"status": "success", "prompt": Dict}.  
+**Errors**: 401 (invalid key), 404 (not found), 500 (DB error).
 
-**Description**: Search documents using hybrid retrieval (semantic + knowledge graph).
+### DELETE /prompts/{category}
+**Description**: Delete a prompt by category.  
+**Path Parameters**: category: str (required).  
+**Query Parameters**: user_id: str (required).  
+**Headers**: X-API-Key (required).  
+**Response**: 200 OK - {"status": "success", "category": str}.  
+**Errors**: 401 (invalid key), 404 (not found), 500 (DB error).
 
-**Headers**:
-- `X-API-Key`: Your API key
-- `Content-Type`: `application/x-www-form-urlencoded`
+### GET /preview/{file_id}
+**Description**: Stream a preview of the file content.  
+**Path Parameters**: file_id: str (required).  
+**Query Parameters**: user_id: str (required).  
+**Headers**: X-API-Key (required).  
+**Response**: 200 OK - StreamingResponse (file bytes, with appropriate MIME type).  
+**Errors**: 401 (invalid key), 404 (not found), 500 (DB error).
 
-**Form Fields**:
-- `query`: (required) The search query
-- `user_id`: (required) User/session ID
-- `file_ids`: (optional) Comma-separated list of file UUIDs
-- `limit`: (optional) Max results (default: 5)
-- `use_graph`: (optional) Boolean for knowledge graph (default: true)
+### GET /chat_sessions
+**Description**: List all chat sessions for a user, including messages.  
+**Query Parameters**: user_id: str (required).  
+**Headers**: X-API-Key (required).  
+**Response**: 200 OK - {"status": "success", "chat_sessions": List[Dict] (with chat_id, messages, etc.)}.  
+**Errors**: 401 (invalid key), 500 (DB error).
 
-**Example Request**:
-```bash
-curl -X POST "http://localhost:8000/search" \
-  -H "X-API-Key: sk-sample1234567890" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "query=insurance coverage&user_id=test_user&limit=3"
-```
+### DELETE /chat_sessions/{chat_id}
+**Description**: Delete a chat session.  
+**Path Parameters**: chat_id: str (required).  
+**Query Parameters**: user_id: str (required).  
+**Headers**: X-API-Key (required).  
+**Response**: 200 OK - {"status": "success", "chat_id": str}.  
+**Errors**: 401 (invalid key), 404 (not found), 500 (DB error).
 
-**Response**:
-```json
-{
-  "status": "success",
-  "results": [
-    {
-      "chunk_id": "022f5020-f6fe-4177-9d03-f50debd93939",
-      "document_id": "c4c82b21-469f-403f-bed7-87ce5b167a8d",
-      "filename": "insurance.pdf",
-      "parent_section": "Section 2",
-      "content": "The policy covers general liability up to $10M...",
-      "score": 0.92
-    }
-  ]
-}
-```
+## Models
+- **FileMetadata**: file_id, filename, file_type, upload_date, content (optional), markdown_content (optional), user_id, size, checksum, category (optional), status.  
+- **ChatMessage**: message_id, chat_id, role, content, timestamp.  
+- **ChatSession**: chat_id, user_id, created_at, updated_at, document_ids, module (optional).  
+- **SearchResult**: chunk_id, document_id, filename, parent_section, chunk_index, content, entities, relationships, score, category (optional).  
+- **Prompt**: id, category, prompt, created_at, updated_at, user_id.
 
-## 💬 `POST /chat`
+## Security
+- All endpoints require X-API-Key matching the configured key (for OpenAI-enabled mode).  
+- User isolation via user_id in queries and filters.
 
-**Description**: Ask questions about uploaded documents with contextual understanding.
-
-**Headers**:
-- `X-API-Key`: Your API key
-- `Content-Type`: `application/x-www-form-urlencoded`
-
-**Form Fields**:
-- `query`: (required) Your question
-- `user_id`: (required) User/session ID
-- `file_ids`: (optional) Comma-separated document UUIDs
-- `chat_id`: (optional) Existing chat session ID
-
-**Example Request**:
-```bash
-curl -X POST "http://localhost:8000/chat" \
-  -H "X-API-Key: sk-sample1234567890" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "query=What's the coverage limit?&user_id=test_user"
-```
-
-**Response**:
-```json
-{
-  "response": "The general liability coverage has a $10M limit per occurrence...",
-  "chat_id": "bd20d3c7-8c1e-409e-bef2-dbf1ec1feb57",
-  "sources": [
-    {
-      "chunk_id": "022f5020-f6fe-4177-9d03-f50debd93939",
-      "document_id": "c4c82b21-469f-403f-bed7-87ce5b167a8d",
-      "filename": "insurance.pdf",
-      "content": "General Liability: $10M per occurrence..."
-    }
-  ]
-}
-```
-
-## 📂 `GET /documents`
-
-**Description**: List all uploaded files for a user.
-
-**Headers**:
-- `X-API-Key`: Your API key
-
-**Query Parameters**:
-- `user_id`: (required) Your user/session ID
-
-**Example Request**:
-```bash
-curl -X GET "http://localhost:8000/documents?user_id=test_user" \
-  -H "X-API-Key: sk-sample1234567890"
-```
-
-**Response**:
-```json
-{
-  "status": "success",
-  "documents": [
-    {
-      "file_id": "c4c82b21-469f-403f-bed7-87ce5b167a8d",
-      "filename": "insurance.pdf",
-      "file_type": "application/pdf",
-      "upload_date": "2025-07-10T14:30:00",
-      "size": 102400
-    }
-  ]
-}
-```
-
-## 🗑 `DELETE /documents/{file_id}`
-
-**Description**: Delete a document and its embeddings.
-
-**Headers**:
-- `X-API-Key`: Your API key
-
-**Path Parameters**:
-- `file_id`: (required) Document UUID
-
-**Query Parameters**:
-- `user_id`: (required) Your user/session ID
-
-**Example Request**:
-```bash
-curl -X DELETE "http://localhost:8000/documents/c4c82b21-469f-403f-bed7-87ce5b167a8d?user_id=test_user" \
-  -H "X-API-Key: sk-sample1234567890"
-```
-
-**Success Response**:
-```json
-{
-  "status": "success",
-  "message": "Document deleted"
-}
-```
-
-## 👁 `GET /preview/{file_id}`
-
-**Description**: Preview raw document content.
-
-**Headers**:
-- `X-API-Key`: Your API key
-
-**Query Parameters**:
-- `user_id`: (required) Your user/session ID
-
-**Response**: Raw file content
-
-## 🧠 `GET /knowledge_graph`
-
-**Description**: Get entity-relationship graph structure.
-
-**Headers**:
-- `X-API-Key`: Your API key
-
-**Query Parameters**:
-- `user_id`: (required) Your user/session ID
-- `file_id`: (optional) Filter by document UUID
-
-**Example Response**:
-```json
-{
-  "status": "success",
-  "nodes": [
-    {"id": "ACE Insurance", "label": "Insurance Provider", "type": "organization"}
-  ],
-  "edges": [
-    {"from": "MCT Inc", "to": "ACE Insurance", "label": "insured_by", "weight": 0.95}
-  ]
-}
-```
-
-## ❤️ `GET /health`
-
-**Description**: Service health check.
-
-**Example Request**:
-```bash
-curl -X GET "http://localhost:8000/health"
-```
-
-**Response**:
-```json
-{
-  "status": "healthy",
-  "version": "1.0.0",
-  "uptime": "12:34:56"
-}
-```
-
-## Error Responses
-
-**401 Unauthorized**:
-```json
-{
-  "detail": "Invalid API Key"
-}
-```
-
-**404 Not Found**:
-```json
-{
-  "detail": "Document not found"
-}
-```
-
-**500 Server Error**:
-```json
-{
-  "detail": "Internal server error"
-}
-```
-
-**Note**: Replace `localhost:8000` with your actual server URL and `sk-sample1234567890` with your valid API key.
+## Notes
+- File processing is asynchronous via Celery. Check status via GET /documents.  
+- Responses may be cached for 1 hour based on query hash.  
+- Supported file types: images (jpg, png, etc.), documents (docx, pdf), spreadsheets (xlsx), text (txt).
