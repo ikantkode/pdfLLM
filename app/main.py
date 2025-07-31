@@ -15,11 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from fastapi.encoders import jsonable_encoder
 import tiktoken
-import psycopg2
-from psycopg2.extras import Json
 from tenacity import retry, stop_after_attempt, wait_exponential
 from openai import OpenAI
-import requests
 from pydantic import BaseModel
 from app.config import settings
 from app.utils.qdrant_handler import QdrantHandler
@@ -27,6 +24,7 @@ from app.utils.text_processor import TextProcessor
 from app.utils.ocr_processor import OCRProcessor
 from app.converters import image_converter, doc_converter, excel_converter, txt_converter
 from app.celery_app import celery_app
+from app.utils.helpers import preprocess_ocr_text, classify_document, get_db_connection
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, MatchAny
 
 # Initialize tokenizer
@@ -66,7 +64,8 @@ app.add_middleware(
 api_key_header = APIKeyHeader(name="X-API-Key")
 
 async def validate_api_key(api_key: str = Depends(api_key_header)):
-    if settings.openai_enabled and api_key != settings.openai_api_key:
+    if api_key != settings.openai_api_key:
+        logger.error(f"Invalid API key provided: {api_key[:4]}...")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API Key"
@@ -75,21 +74,20 @@ async def validate_api_key(api_key: str = Depends(api_key_header)):
 
 # Check provider configuration
 def validate_provider_settings():
-    if settings.openai_enabled and settings.ollama_enabled:
-        logger.error("Both OpenAI and Ollama are enabled. Only one provider can be active.")
+    if not settings.openai_enabled:
+        logger.error("OpenAI is not enabled. Please set OPENAI_ENABLED to true.")
         raise HTTPException(
             status_code=400,
-            detail="Invalid configuration: Both OPENAI_ENABLED and OLLAMA_ENABLED are set to true."
-        )
-    if not settings.openai_enabled and not settings.ollama_enabled:
-        logger.error("No provider enabled. Either OPENAI_ENABLED or OLLAMA_ENABLED must be set to true.")
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid configuration: Neither OPENAI_ENABLED nor OLLAMA_ENABLED is set to true."
+            detail="Invalid configuration: OPENAI_ENABLED must be set to true."
         )
 
 # Initialize OCR processor
-ocr_processor = OCRProcessor()
+try:
+    ocr_processor = OCRProcessor()
+    logger.info("OCRProcessor initialized successfully")
+except Exception as e:
+    logger.error(f"OCRProcessor initialization failed: {str(e)}")
+    raise
 
 # Initialize Qdrant with retry logic
 @retry(
@@ -121,16 +119,6 @@ except Exception as e:
 
 # Create necessary directories
 Path(settings.temp_upload_dir).mkdir(parents=True, exist_ok=True)
-
-# PostgreSQL connection
-def get_db_connection():
-    return psycopg2.connect(
-        host=settings.postgres_host,
-        port=settings.postgres_port,
-        database=settings.postgres_db,
-        user=settings.postgres_user,
-        password=settings.postgres_password
-    )
 
 # Models
 class FileMetadata(BaseModel):
@@ -193,68 +181,6 @@ def get_file_converter(file_ext: str):
         return txt_converter.convert_to_markdown
     return None
 
-def split_large_text(text: str, max_tokens: int = settings.max_embedding_tokens) -> List[str]:
-    table_pattern = r'(\|.*?\|\n(?:\|[-: ]+\|\n)+.*?)(?=\n\n|\Z)'
-    tables = re.findall(table_pattern, text, re.DOTALL)
-    non_table_text = re.sub(table_pattern, 'TABLE_PLACEHOLDER', text)
-
-    chunks = []
-    current_chunk = ""
-    token_count = 0
-    placeholder_count = 0
-
-    doc = text_processor.nlp(non_table_text)
-    for sent in doc.sents:
-        sent_text = sent.text
-        if 'TABLE_PLACEHOLDER' in sent_text:
-            if placeholder_count < len(tables):
-                sent_text = sent_text.replace('TABLE_PLACEHOLDER', tables[placeholder_count])
-                placeholder_count += 1
-        sent_tokens = len(tokenizer.encode(sent_text))
-
-        if token_count + sent_tokens > max_tokens:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-                current_chunk = ""
-                token_count = 0
-            if sent_tokens > max_tokens:
-                sub_chunks = [sent_text[i:i + max_tokens] for i in range(0, len(sent_text), max_tokens)]
-                chunks.extend(sub_chunks)
-                continue
-
-        current_chunk += sent_text + "\n"
-        token_count += sent_tokens
-
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-
-    while placeholder_count < len(tables):
-        table_tokens = len(tokenizer.encode(tables[placeholder_count]))
-        if table_tokens <= max_tokens:
-            chunks.append(tables[placeholder_count])
-        else:
-            rows = tables[placeholder_count].split('\n')
-            sub_chunk = ""
-            sub_tokens = 0
-            for row in rows:
-                row_tokens = len(tokenizer.encode(row))
-                if sub_tokens + row_tokens > max_tokens:
-                    if sub_chunk:
-                        chunks.append(sub_chunk.strip())
-                        sub_chunk = ""
-                        sub_tokens = 0
-                    sub_chunk += row + "\n"
-                    sub_tokens += row_tokens
-                else:
-                    sub_chunk += row + "\n"
-                    sub_tokens += row_tokens
-            if sub_chunk:
-                chunks.append(sub_chunk.strip())
-        placeholder_count += 1
-
-    logger.info(f"Split text into {len(chunks)} chunks with max {max_tokens} tokens")
-    return chunks
-
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=4, max=10),
@@ -263,129 +189,18 @@ def split_large_text(text: str, max_tokens: int = settings.max_embedding_tokens)
 def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
     validate_provider_settings()
     try:
-        if settings.openai_enabled:
-            client = OpenAI(api_key=settings.openai_api_key)
-            response = client.embeddings.create(
-                input=texts,
-                model=settings.openai_embedding_model,
-                dimensions=1024
-            )
-            embeddings = [item.embedding for item in response.data]
-            logger.info(f"OpenAI embeddings generated with {len(embeddings[0])} dimensions")
-            return embeddings
-        else:
-            embeddings = []
-            for text in texts:
-                response = requests.post(
-                    f"http://{settings.ollama_host}:{settings.ollama_port}/api/embeddings",
-                    json={
-                        "model": settings.ollama_embedding_model,
-                        "prompt": text
-                    }
-                )
-                response.raise_for_status()
-                data = response.json()
-                embeddings.append(data["embedding"])
-            logger.info(f"Ollama embeddings generated with {len(embeddings[0])} dimensions")
-            return embeddings
+        client = OpenAI(api_key=settings.openai_api_key)
+        response = client.embeddings.create(
+            input=texts,
+            model=settings.openai_embedding_model,
+            dimensions=1024
+        )
+        embeddings = [item.embedding for item in response.data]
+        logger.info(f"OpenAI embeddings generated with {len(embeddings[0])} dimensions")
+        return embeddings
     except Exception as e:
         logger.error(f"Embedding generation failed: {str(e)}")
         raise
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=4, max=10),
-    reraise=True
-)
-async def preprocess_ocr_text(text: str) -> str:
-    validate_provider_settings()
-    chunks = split_large_text(text, max_tokens=settings.max_embedding_tokens // 2)
-    cleaned_chunks = []
-
-    if settings.openai_enabled:
-        client = OpenAI(api_key=settings.openai_api_key)
-    else:
-        client = None
-
-    for chunk in chunks:
-        try:
-            prompt = (
-                f"Input Text:\n{chunk}\n\n"
-                "You are a document cleaner. Remove all OCR artifacts first, then re-format the remainder.\n\n"
-                "Step-0 (MANDATORY): Collapse every space inside a token (words, names, numbers, currency, dates). "
-                "Example: ‘1 , 0 0 0 , 0 0 0’ → ‘1,000,000’, ‘A d d i t i o n a l’ → ‘Additional’. "
-                "Do not remove spaces that separate distinct tokens.\n\n"
-                "Steps 1-11:\n"
-                "1. Reconstruct the text into clear, grammatical, logically structured content.\n"
-                "2. Standardize numbers and currency (single ‘$’, commas for thousands, two decimals).\n"
-                "3. Rejoin broken names/words that remain after Step-0.\n"
-                "4. Separate metadata labels (Date, Signature, etc.) from the preceding name/value.\n"
-                "5. Preserve markdown headings, lists, and tables; ensure tables are well-aligned.\n"
-                "6. If payroll data (employee, role, hours, rate, gross/net pay) is present:\n"
-                "   - Render it in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay.\n"
-                "   - Validate: Gross Pay ≈ Hours × Rate, Net Pay < Gross Pay. Note any assumptions.\n"
-                "7. If not payroll-related, simply return clean markdown prose.\n"
-                "8. Remove gibberish or noise; keep all meaningful data.\n"
-                "9. Comment assumptions with <!-- ... -->.\n"
-                "10. Return only the cleaned markdown.\n"
-                "11. Stay under the token budget.\n"
-            )
-
-            if settings.openai_enabled:
-                response = client.chat.completions.create(
-                    model=settings.openai_chat_model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are an expert at cleaning and reconstructing noisy OCR-extracted text. "
-                                "Correct OCR errors, including spaces between characters in words, names, or numbers. "
-                                "Format numbers and names properly, ensuring single '$' for currency, and structure the output in clear, coherent markdown. "
-                                "Preserve meaningful information and structural elements (e.g., lists, tables). "
-                                "For payroll data, format details in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay. "
-                                "Validate numerical consistency: Gross Pay = Hours × Rate, Net Pay < Gross Pay. "
-                                "Note any assumptions made due to ambiguous text in markdown comments."
-                            )
-                        },
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=settings.max_completion_tokens,
-                    temperature=0.3
-                )
-                cleaned_chunk = response.choices[0].message.content.strip()
-            else:
-                response = requests.post(
-                    f"http://{settings.ollama_host}:{settings.ollama_port}/v1/chat/completions",
-                    json={
-                        "model": settings.ollama_chat_model,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": (
-                                    "You are an expert at cleaning and reconstructing noisy OCR-extracted text. "
-                                    "Correct OCR errors, including spaces between characters in words, names, or numbers. "
-                                    "Format numbers and names properly, ensuring single '$' for currency, and structure the output in clear, coherent markdown. "
-                                    "Preserve meaningful information and structural elements (e.g., lists, tables). "
-                                    "For payroll data, format details in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay. "
-                                    "Validate numerical consistency: Gross Pay = Hours × Rate, Net Pay < Gross Pay. "
-                                    "Note any assumptions made due to ambiguous text in markdown comments."
-                                )
-                            },
-                            {"role": "user", "content": prompt}
-                        ],
-                        "max_tokens": settings.max_completion_tokens,
-                        "temperature": 0.3
-                    }
-                )
-                response.raise_for_status()
-                cleaned_chunk = response.json()["choices"][0]["message"]["content"].strip()
-
-            cleaned_chunks.append(cleaned_chunk)
-        except Exception as e:
-            logger.error(f"Failed to preprocess OCR chunk: {str(e)}")
-            raise
-
-    return "\n\n".join(cleaned_chunks)
 
 def clean_response(text: str) -> str:
     text = re.sub(r'(?<=\w)\n(?=\w)', ' ', text)
@@ -498,16 +313,16 @@ def generate_coherent_response(query: str, context: str, category: str, user_id:
             )
             prompt_row = cur.fetchone()
             system_prompt = prompt_row[0] if prompt_row else "You are a document analyst."
+    except Exception as e:
+        logger.error(f"Failed to fetch prompt for category {category}, user {user_id}: {str(e)}")
+        raise
     finally:
         conn.close()
 
     try:
-        if settings.openai_enabled:
-            client = OpenAI(api_key=settings.openai_api_key)
-        else:
-            client = None
+        client = OpenAI(api_key=settings.openai_api_key)
     except Exception as e:
-        logger.error(f"Failed to initialize client: {str(e)}")
+        logger.error(f"Failed to initialize OpenAI client: {str(e)}")
         raise HTTPException(status_code=500, detail="Service configuration error")
 
     user_prompt = f"""DOCUMENT CONTEXT:
@@ -517,53 +332,20 @@ USER QUESTION:
 {query}"""
 
     try:
-        if settings.openai_enabled:
-            response = client.chat.completions.create(
-                model=settings.openai_chat_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                max_tokens=settings.max_completion_tokens,
-                temperature=0.3
-            )
-            response_text = response.choices[0].message.content.strip()
-        else:
-            response = requests.post(
-                f"http://{settings.ollama_host}:{settings.ollama_port}/v1/chat/completions",
-                json={
-                    "model": settings.ollama_chat_model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    "max_tokens": settings.max_completion_tokens,
-                    "temperature": 0.3
-                },
-                timeout=30
-            )
-            response.raise_for_status()
-            response_text = response.json()["choices"][0]["message"]["content"].strip()
-
+        response = client.chat.completions.create(
+            model=settings.openai_chat_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=settings.max_completion_tokens,
+            temperature=0.3
+        )
+        response_text = response.choices[0].message.content.strip()
         return clean_response(response_text)
-    except requests.exceptions.RequestException as e:
-        logger.error(f"API request failed: {str(e)}")
-        raise HTTPException(status_code=502, detail="Service temporarily unavailable")
     except Exception as e:
         logger.error(f"Unexpected error in response generation: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to generate response")
-
-def classify_document(content: str) -> str:
-    keywords = {
-        "submittals": ["ASTM", "submittal", "material", "compliance"],
-        "payrolls": ["gross pay", "net pay", "employee", "hours", "rate"],
-        "bank_statements": ["deposit", "withdrawal", "balance", "account number"]
-    }
-    content_lower = content.lower()
-    for category, terms in keywords.items():
-        if any(term in content_lower for term in terms):
-            return category
-    return None
+        raise HTTPException(status_code=500, detail=f"Failed to generate response: {str(e)}")
 
 # API Endpoints
 @app.post("/process_file", response_model=Dict[str, str])
@@ -575,6 +357,7 @@ async def process_file(
 ):
     validate_provider_settings()
     if file.size > settings.max_document_size:
+        logger.error(f"File {file.filename} size {file.size/(1024*1024):.2f}MB exceeds limit {settings.max_document_size/(1024*1024):.2f}MB")
         raise HTTPException(
             status_code=400,
             detail=f"File size exceeds {settings.max_document_size//(1024*1024)}MB limit"
@@ -587,11 +370,12 @@ async def process_file(
                 "SELECT file_id FROM file_metadata WHERE filename = %s AND user_id = %s",
                 (file.filename, user_id)
             )
-            if cur.fetchone():
-                logger.info(f"File {file.filename} already exists for user {user_id}")
+            existing_file = cur.fetchone()
+            if existing_file:
+                logger.info(f"File {file.filename} already exists for user {user_id}, file_id: {existing_file[0]}")
                 return {
                     "status": "success",
-                    "file_id": cur.fetchone()[0],
+                    "file_id": existing_file[0],
                     "filename": file.filename
                 }
 
@@ -622,8 +406,8 @@ async def process_file(
             "filename": file.filename
         }
     except Exception as e:
-        logger.error(f"File processing failed for {file.filename}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"File processing failed for {file.filename}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"File processing error: {str(e)}")
     finally:
         conn.close()
 
@@ -638,14 +422,15 @@ async def chat_with_documents(
 ):
     try:
         cleaned_query = clean_query(query)
+        logger.debug(f"Processing chat query: {cleaned_query[:100]}... for user: {user_id}, category: {category}")
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
-                query_chunks = split_large_text(cleaned_query)
+                query_chunks = text_processor.chunk_text(cleaned_query)
                 per_doc_limit = max(1, 5 // max(1, len(file_ids or [])))
                 vector_results = []
                 for chunk in query_chunks:
-                    embedding = generate_embeddings_batch([chunk])[0]
+                    embedding = generate_embeddings_batch([chunk['content']])[0]
                     query_filter = Filter(must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))])
                     if file_ids:
                         query_filter.must.append(FieldCondition(key="document_id", match=MatchAny(any=file_ids)))
@@ -668,6 +453,7 @@ async def chat_with_documents(
                 search_results = format_search_results(combined_results, file_map)
 
                 if not search_results:
+                    logger.info(f"No relevant information found for query: {cleaned_query[:100]}...")
                     return {
                         "response": "No relevant information found in the documents.",
                         "chat_id": chat_id or str(uuid.uuid4()),
@@ -716,16 +502,22 @@ async def chat_with_documents(
                 )
                 conn.commit()
 
+                logger.info(f"Chat response generated for chat_id: {chat_id}, user: {user_id}")
                 return {
                     "response": response,
                     "chat_id": chat_id,
                     "sources": search_results
                 }
+        except Exception as e:
+            logger.error(f"Chat failed for user {user_id}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Chat processing error: {str(e)}")
         finally:
             conn.close()
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Chat failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error in chat endpoint: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.get("/documents", response_model=Dict[str, Any])
 async def list_documents(
@@ -752,12 +544,16 @@ async def list_documents(
                     }
                     for row in cur.fetchall()
                 ]
-            return {"status": "success", "documents": documents}
+                logger.info(f"Retrieved {len(documents)} documents for user {user_id}")
+                return {"status": "success", "documents": documents}
+        except Exception as e:
+            logger.error(f"Failed to list documents for user {user_id}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
         finally:
             conn.close()
     except Exception as e:
-        logger.error(f"Failed to list documents: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error in list_documents: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.delete("/documents/{file_id}", response_model=Dict[str, str])
 async def delete_document(
@@ -775,15 +571,21 @@ async def delete_document(
                     (file_id, user_id)
                 )
                 if cur.rowcount == 0:
+                    logger.warning(f"File not found for deletion: file_id={file_id}, user_id={user_id}")
                     raise HTTPException(status_code=404, detail="File not found")
                 conn.commit()
-            logger.info(f"Deleted document: {file_id}")
+            logger.info(f"Deleted document: {file_id} for user {user_id}")
             return {"status": "success", "file_id": file_id}
+        except Exception as e:
+            logger.error(f"Failed to delete document {file_id} for user {user_id}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to delete document: {str(e)}")
         finally:
             conn.close()
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to delete document {file_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error in delete_document: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.patch("/documents/{file_id}", response_model=Dict[str, str])
 async def update_document_category(
@@ -801,16 +603,22 @@ async def update_document_category(
                     (category, file_id, user_id)
                 )
                 if cur.rowcount == 0:
+                    logger.warning(f"File not found for category update: file_id={file_id}, user_id={user_id}")
                     raise HTTPException(status_code=404, detail="File not found")
                 conn.commit()
                 qdrant_handler.update_metadata(file_id, {"category": category})
-            logger.info(f"Updated category for document {file_id} to {category}")
+            logger.info(f"Updated category for document {file_id} to {category} for user {user_id}")
             return {"status": "success", "file_id": file_id, "category": category}
+        except Exception as e:
+            logger.error(f"Failed to update document {file_id} category for user {user_id}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to update document category: {str(e)}")
         finally:
             conn.close()
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to update document {file_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error in update_document_category: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.post("/prompts", response_model=Dict[str, Any])
 async def create_prompt(
@@ -819,63 +627,102 @@ async def create_prompt(
     user_id: str = Form(...),
     api_key: str = Depends(validate_api_key)
 ):
-    if len(tokenizer.encode(prompt)) > 1000:
-        raise HTTPException(status_code=400, detail="Prompt exceeds 1000 token limit")
-    conn = get_db_connection()
+    logger.debug(f"Attempting to create/update prompt for category: {category}, user_id: {user_id}")
     try:
-        with conn.cursor() as cur:
-            cur.execute(
+        if not category.strip():
+            logger.error("Category cannot be empty")
+            raise HTTPException(status_code=400, detail="Category cannot be empty")
+        if not prompt.strip():
+            logger.error("Prompt cannot be empty")
+            raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+
+        try:
+            token_count = len(tokenizer.encode(prompt))
+            logger.debug(f"Prompt token count: {token_count}")
+            if token_count > 1000:
+                logger.error(f"Prompt exceeds 1000 token limit: {token_count} tokens")
+                raise HTTPException(status_code=400, detail=f"Prompt exceeds 1000 token limit: {token_count} tokens")
+        except Exception as e:
+            logger.error(f"Failed to tokenize prompt: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=400, detail=f"Invalid prompt text: {str(e)}")
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                sql_query = """
+                    INSERT INTO prompts (category, prompt, user_id)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT ON CONSTRAINT unique_category_user
+                    DO UPDATE SET prompt = EXCLUDED.prompt, updated_at = CURRENT_TIMESTAMP
+                    RETURNING id, created_at, updated_at
                 """
-                INSERT INTO prompts (category, prompt, user_id)
-                VALUES (%s, %s, %s)
-                ON CONFLICT ON CONSTRAINT unique_category_user
-                DO UPDATE SET prompt = EXCLUDED.prompt, updated_at = CURRENT_TIMESTAMP
-                RETURNING id, created_at, updated_at
-                """,
-                (category, prompt, user_id)
-            )
-            row = cur.fetchone()
-            conn.commit()
-            return {
-                "status": "success",
-                "prompt": {
-                    "id": row[0],
-                    "category": category,
-                    "prompt": prompt,
-                    "user_id": user_id,
-                    "created_at": row[1].isoformat(),
-                    "updated_at": row[2].isoformat()
+                logger.debug(f"Executing SQL: {sql_query} with params: ({category}, [prompt], {user_id})")
+                cur.execute(sql_query, (category, prompt, user_id))
+                row = cur.fetchone()
+                if not row:
+                    logger.error(f"No rows returned from prompt insertion for category: {category}, user_id: {user_id}")
+                    raise HTTPException(status_code=500, detail="Failed to save prompt: No rows affected")
+                conn.commit()
+                logger.info(f"Successfully saved prompt for category: {category}, user_id: {user_id}, prompt_id: {row[0]}")
+                return {
+                    "status": "success",
+                    "prompt": {
+                        "id": row[0],
+                        "category": category,
+                        "prompt": prompt,
+                        "user_id": user_id,
+                        "created_at": row[1].isoformat(),
+                        "updated_at": row[2].isoformat()
+                    }
                 }
-            }
-    finally:
-        conn.close()
+        except psycopg2.errors.UndefinedObject as e:
+            logger.error(f"Database constraint error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Database constraint error: {str(e)}")
+        except psycopg2.Error as e:
+            logger.error(f"Database error: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in create_prompt: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.get("/prompts", response_model=Dict[str, Any])
 async def list_prompts(
     user_id: str,
     api_key: str = Depends(validate_api_key)
 ):
-    conn = get_db_connection()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, category, prompt, created_at, updated_at FROM prompts WHERE user_id = %s",
-                (user_id,)
-            )
-            prompts = [
-                {
-                    "id": row[0],
-                    "category": row[1],
-                    "prompt": row[2],
-                    "created_at": row[3].isoformat(),
-                    "updated_at": row[4].isoformat(),
-                    "user_id": user_id
-                }
-                for row in cur.fetchall()
-            ]
-        return {"status": "success", "prompts": prompts}
-    finally:
-        conn.close()
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, category, prompt, created_at, updated_at FROM prompts WHERE user_id = %s",
+                    (user_id,)
+                )
+                prompts = [
+                    {
+                        "id": row[0],
+                        "category": row[1],
+                        "prompt": row[2],
+                        "created_at": row[3].isoformat(),
+                        "updated_at": row[4].isoformat(),
+                        "user_id": user_id
+                    }
+                    for row in cur.fetchall()
+                ]
+                logger.info(f"Retrieved {len(prompts)} prompts for user {user_id}")
+                return {"status": "success", "prompts": prompts}
+        except Exception as e:
+            logger.error(f"Failed to list prompts for user {user_id}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to list prompts: {str(e)}")
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"Unexpected error in list_prompts: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.get("/prompts/{category}", response_model=Dict[str, Any])
 async def get_prompt(
@@ -883,29 +730,38 @@ async def get_prompt(
     user_id: str,
     api_key: str = Depends(validate_api_key)
 ):
-    conn = get_db_connection()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, prompt, created_at, updated_at FROM prompts WHERE category = %s AND user_id = %s",
-                (category, user_id)
-            )
-            row = cur.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="Prompt not found")
-            return {
-                "status": "success",
-                "prompt": {
-                    "id": row[0],
-                    "category": category,
-                    "prompt": row[1],
-                    "user_id": user_id,
-                    "created_at": row[2].isoformat(),
-                    "updated_at": row[3].isoformat()
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, prompt, created_at, updated_at FROM prompts WHERE category = %s AND user_id = %s",
+                    (category, user_id)
+                )
+                row = cur.fetchone()
+                if not row:
+                    logger.warning(f"Prompt not found for category: {category}, user_id: {user_id}")
+                    raise HTTPException(status_code=404, detail="Prompt not found")
+                logger.info(f"Retrieved prompt for category: {category}, user_id: {user_id}")
+                return {
+                    "status": "success",
+                    "prompt": {
+                        "id": row[0],
+                        "category": category,
+                        "prompt": row[1],
+                        "user_id": user_id,
+                        "created_at": row[2].isoformat(),
+                        "updated_at": row[3].isoformat()
+                    }
                 }
-            }
-    finally:
-        conn.close()
+        except Exception as e:
+            logger.error(f"Failed to get prompt for category {category}, user {user_id}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to get prompt: {str(e)}")
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"Unexpected error in get_prompt: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.delete("/prompts/{category}", response_model=Dict[str, str])
 async def delete_prompt(
@@ -913,96 +769,124 @@ async def delete_prompt(
     user_id: str,
     api_key: str = Depends(validate_api_key)
 ):
-    conn = get_db_connection()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM prompts WHERE category = %s AND user_id = %s",
-                (category, user_id)
-            )
-            if cur.rowcount == 0:
-                raise HTTPException(status_code=404, detail="Prompt not found")
-            conn.commit()
-        return {"status": "success", "category": category}
-    finally:
-        conn.close()
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM prompts WHERE category = %s AND user_id = %s",
+                    (category, user_id)
+                )
+                if cur.rowcount == 0:
+                    logger.warning(f"Prompt not found for deletion: category={category}, user_id={user_id}")
+                    raise HTTPException(status_code=404, detail="Prompt not found")
+                conn.commit()
+                logger.info(f"Deleted prompt for category: {category}, user_id: {user_id}")
+                return {"status": "success", "category": category}
+        except Exception as e:
+            logger.error(f"Failed to delete prompt for category {category}, user {user_id}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to delete prompt: {str(e)}")
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"Unexpected error in delete_prompt: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.get("/preview/{file_id}")
 async def preview_file(file_id: str, user_id: str, api_key: str = Depends(validate_api_key)):
-    conn = get_db_connection()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT content, file_type FROM file_metadata WHERE file_id = %s AND user_id = %s",
-                (file_id, user_id)
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT content, file_type FROM file_metadata WHERE file_id = %s AND user_id = %s",
+                    (file_id, user_id)
+                )
+                row = cur.fetchone()
+                if not row:
+                    logger.warning(f"File not found for preview: file_id={file_id}, user_id={user_id}")
+                    raise HTTPException(status_code=404, detail="File not found")
+                content, file_type = row
+            logger.info(f"Previewing file: {file_id} for user {user_id}")
+            mime_map = {
+                ".pdf": "application/pdf",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".heic": "image/heic",
+                ".webp": "image/webp",
+                ".doc": "application/msword",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".odt": "application/vnd.oasis.opendocument.text",
+                ".xls": "application/vnd.ms-excel",
+                ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ".csv": "text/csv",
+                ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+                ".txt": "text/plain",
+                ".md": "text/markdown",
+                ".rtf": "application/rtf"
+            }
+            return StreamingResponse(
+                BytesIO(content),
+                media_type=mime_map.get(file_type, "application/octet-stream")
             )
-            row = cur.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="File not found")
-            content, file_type = row
-        mime_map = {
-            ".pdf": "application/pdf",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".heic": "image/heic",
-            ".webp": "image/webp",
-            ".doc": "application/msword",
-            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            ".odt": "application/vnd.oasis.opendocument.text",
-            ".xls": "application/vnd.ms-excel",
-            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            ".csv": "text/csv",
-            ".ods": "application/vnd.oasis.opendocument.spreadsheet",
-            ".txt": "text/plain",
-            ".md": "text/markdown",
-            ".rtf": "application/rtf"
-        }
-        return StreamingResponse(
-            BytesIO(content),
-            media_type=mime_map.get(file_type, "application/octet-stream")
-        )
-    finally:
-        conn.close()
+        except Exception as e:
+            logger.error(f"Failed to preview file {file_id} for user {user_id}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to preview file: {str(e)}")
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in preview_file: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.get("/chat_sessions", response_model=Dict[str, Any])
 async def list_chat_sessions(
     user_id: str,
     api_key: str = Depends(validate_api_key)
 ):
-    conn = get_db_connection()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT chat_id, created_at, updated_at, document_ids, module
-                FROM chat_sessions WHERE user_id = %s
-                """,
-                (user_id,)
-            )
-            sessions = [
-                {
-                    "chat_id": str(row[0]),
-                    "user_id": user_id,
-                    "created_at": row[1].isoformat(),
-                    "updated_at": row[2].isoformat(),
-                    "document_ids": [str(id) for id in row[3] or []],
-                    "module": row[4]
-                }
-                for row in cur.fetchall()
-            ]
-            for session in sessions:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT role, content, timestamp FROM chat_messages WHERE chat_id = %s ORDER BY timestamp",
-                    (session["chat_id"],)
+                    """
+                    SELECT chat_id, created_at, updated_at, document_ids, module
+                    FROM chat_sessions WHERE user_id = %s
+                    """,
+                    (user_id,)
                 )
-                session["messages"] = [
-                    {"role": row[0], "content": row[1], "timestamp": row[2].isoformat()}
+                sessions = [
+                    {
+                        "chat_id": str(row[0]),
+                        "user_id": user_id,
+                        "created_at": row[1].isoformat(),
+                        "updated_at": row[2].isoformat(),
+                        "document_ids": [str(id) for id in row[3] or []],
+                        "module": row[4]
+                    }
                     for row in cur.fetchall()
                 ]
-        return {"status": "success", "chat_sessions": sessions}
-    finally:
-        conn.close()
+                for session in sessions:
+                    cur.execute(
+                        "SELECT role, content, timestamp FROM chat_messages WHERE chat_id = %s ORDER BY timestamp",
+                        (session["chat_id"],)
+                    )
+                    session["messages"] = [
+                        {"role": row[0], "content": row[1], "timestamp": row[2].isoformat()}
+                        for row in cur.fetchall()
+                    ]
+                logger.info(f"Retrieved {len(sessions)} chat sessions for user {user_id}")
+                return {"status": "success", "chat_sessions": sessions}
+        except Exception as e:
+            logger.error(f"Failed to list chat sessions for user {user_id}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to list chat sessions: {str(e)}")
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"Unexpected error in list_chat_sessions: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.delete("/chat_sessions/{chat_id}", response_model=Dict[str, str])
 async def delete_chat_session(
@@ -1010,22 +894,34 @@ async def delete_chat_session(
     user_id: str,
     api_key: str = Depends(validate_api_key)
 ):
-    conn = get_db_connection()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM chat_sessions WHERE chat_id = %s AND user_id = %s",
-                (chat_id, user_id)
-            )
-            if cur.rowcount == 0:
-                raise HTTPException(status_code=404, detail="Chat session not found")
-            conn.commit()
-        return {"status": "success", "chat_id": chat_id}
-    finally:
-        conn.close()
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM chat_sessions WHERE chat_id = %s AND user_id = %s",
+                    (chat_id, user_id)
+                )
+                if cur.rowcount == 0:
+                    logger.warning(f"Chat session not found for deletion: chat_id={chat_id}, user_id={user_id}")
+                    raise HTTPException(status_code=404, detail="Chat session not found")
+                conn.commit()
+                logger.info(f"Deleted chat session: {chat_id} for user {user_id}")
+                return {"status": "success", "chat_id": chat_id}
+        except Exception as e:
+            logger.error(f"Failed to delete chat session {chat_id} for user {user_id}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to delete chat session: {str(e)}")
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in delete_chat_session: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
+    logger.error(f"HTTP Exception: {exc.status_code} - {exc.detail}")
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail},
@@ -1036,5 +932,5 @@ async def generic_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error"},
+        content={"detail": f"Internal server error: {str(exc)}"}
     )

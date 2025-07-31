@@ -30,17 +30,10 @@ class Settings(BaseSettings):
     }
 
     # OpenAI settings
-    openai_enabled: bool = Field(False, env="OPENAI_ENABLED")
+    openai_enabled: bool = Field(True, env="OPENAI_ENABLED")
     openai_api_key: str = Field("", env="OPENAI_API_KEY")
     openai_embedding_model: str = Field("text-embedding-3-small", env="OPENAI_EMBEDDING_MODEL")
     openai_chat_model: str = Field("gpt-4o-mini", env="OPENAI_CHAT_MODEL")
-
-    # Ollama settings
-    ollama_enabled: bool = Field(False, env="OLLAMA_ENABLED")
-    ollama_host: str = Field("localhost", env="OLLAMA_HOST")
-    ollama_port: int = Field(11434, env="OLLAMA_PORT")
-    ollama_embedding_model: str = Field("bge-m3:latest", env="OLLAMA_EMBEDDING_MODEL")
-    ollama_chat_model: str = Field("llama3.1:8b", env="OLLAMA_CHAT_MODEL")
 
     # Common model settings
     max_embedding_tokens: int = 8191
@@ -49,7 +42,7 @@ class Settings(BaseSettings):
     # Qdrant settings
     qdrant_host: str = "qdrant"
     qdrant_port: int = 6333
-    qdrant_collection: str = "documents"
+    qdrant_collection: str = "pdfllm_collection"
 
     # PostgreSQL settings
     postgres_host: str = Field("postgres", env="POSTGRES_HOST")

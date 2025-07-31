@@ -5,7 +5,6 @@ from typing import List, Dict, Any, Tuple
 import spacy
 from openai import OpenAI
 import tiktoken
-import requests
 from app.config import settings
 from tenacity import retry, stop_after_attempt, wait_exponential
 import nltk
@@ -31,25 +30,22 @@ class TextProcessor:
             raise
 
         # Validate provider settings
-        if settings.openai_enabled and settings.ollama_enabled:
-            logger.error("Both OpenAI and Ollama are enabled. Only one provider can be active.")
-            raise ValueError("Invalid configuration: Both OPENAI_ENABLED and OLLAMA_ENABLED are set to true.")
-        if not settings.openai_enabled and not settings.ollama_enabled:
-            logger.error("No provider enabled. Either OPENAI_ENABLED or OLLAMA_ENABLED must be set to true.")
-            raise ValueError("Invalid configuration: Neither OPENAI_ENABLED nor OLLAMA_ENABLED is set to true.")
+        if not settings.openai_enabled:
+            logger.error("OpenAI is not enabled. Please set OPENAI_ENABLED to true.")
+            raise ValueError("Invalid configuration: OPENAI_ENABLED must be set to true.")
 
-        # Initialize OpenAI client only if OpenAI is enabled
-        self.client = OpenAI(api_key=settings.openai_api_key) if settings.openai_enabled else None
-
-        # Select tokenizer based on enabled provider
+        # Initialize OpenAI client
         try:
-            if settings.openai_enabled:
-                self.tokenizer = tiktoken.encoding_for_model(settings.openai_embedding_model)
-                logger.info(f"Tokenizer initialized for OpenAI model: {settings.openai_embedding_model}")
-            else:  # Ollama enabled
-                # Ollama uses cl100k_base tokenizer for compatibility
-                self.tokenizer = tiktoken.get_encoding("cl100k_base")
-                logger.info("Tokenizer initialized for Ollama with cl100k_base")
+            self.client = OpenAI(api_key=settings.openai_api_key)
+            logger.info("OpenAI client initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI client: {str(e)}")
+            raise
+
+        # Initialize tokenizer
+        try:
+            self.tokenizer = tiktoken.encoding_for_model(settings.openai_embedding_model)
+            logger.info(f"Tokenizer initialized for OpenAI model: {settings.openai_embedding_model}")
         except Exception as e:
             logger.error(f"Tokenizer initialization failed: {str(e)}")
             raise
@@ -238,14 +234,7 @@ class TextProcessor:
         reraise=True
     )
     async def extract_relationships(self, chunk: Dict) -> List[Dict]:
-        """Extract relationships from chunk, ensuring subjects and objects are sanitized.
-        
-        Args:
-            chunk: Dictionary containing text content with keys 'content' and 'chunk_index'
-            
-        Returns:
-            List of dictionaries with 'subject', 'predicate', 'object' keys, or empty list on error
-        """
+        """Extract relationships from chunk, ensuring subjects and objects are sanitized."""
         # Validate input
         if not isinstance(chunk, dict) or 'content' not in chunk:
             logger.error("Invalid chunk format - missing 'content' key")
@@ -270,67 +259,31 @@ class TextProcessor:
         )
 
         try:
-            if settings.openai_enabled:
-                response = self.client.chat.completions.create(
-                    model=settings.openai_chat_model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are an expert relationship extractor. Follow these rules:\n"
-                                "1. Return ONLY valid JSON with {'relationships': [...]}\n"
-                                "2. Each relationship must have subject, predicate, object\n"
-                                "3. Sanitize text (no newlines/tabs, minimal spaces)\n"
-                                "4. Exclude Date/Signature entities\n"
-                                "5. No explanations or extra text\n"
-                                "6. If uncertain, omit the relationship"
-                            )
-                        },
-                        {"role": "user", "content": prompt}
-                    ],
-                    response_format={"type": "json_object"},
-                    max_tokens=300,
-                    temperature=0.2  # Lower temperature for more consistent results
-                )
-                raw_response = response.choices[0].message.content.strip()
-            else:  # Ollama enabled
-                response = requests.post(
-                    f"http://{settings.ollama_host}:{settings.ollama_port}/api/chat",
-                    json={
-                        "model": settings.ollama_chat_model,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": (
-                                    "You are an expert relationship extractor. Rules:\n"
-                                    "1. Return ONLY valid JSON with {'relationships': [...]}\n"
-                                    "2. Each relationship must have subject, predicate, object\n"
-                                    "3. Sanitize text (no newlines/tabs, minimal spaces)\n"
-                                    "4. Exclude Date/Signature entities\n"
-                                    "5. No markdown, explanations, or extra text\n"
-                                    "6. If uncertain, omit the relationship"
-                                )
-                            },
-                            {"role": "user", "content": prompt}
-                        ],
-                        "options": {
-                            "temperature": 0.2,
-                            "num_ctx": 2048
-                        },
-                        "format": "json",
-                        "stream": False
+            response = self.client.chat.completions.create(
+                model=settings.openai_chat_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an expert relationship extractor. Follow these rules:\n"
+                            "1. Return ONLY valid JSON with {'relationships': [...]}\n"
+                            "2. Each relationship must have subject, predicate, object\n"
+                            "3. Sanitize text (no newlines/tabs, minimal spaces)\n"
+                            "4. Exclude Date/Signature entities\n"
+                            "5. No explanations or extra text\n"
+                            "6. If uncertain, omit the relationship"
+                        )
                     },
-                    timeout=30  # Add timeout to prevent hanging
-                )
-                response.raise_for_status()
-                raw_response = response.json().get("message", {}).get("content", "").strip()
-                logger.debug(f"Raw Ollama response for chunk {chunk_index}: {raw_response[:200]}...")  # Log truncated response
-
-            # Clean and parse response
-            cleaned_response = raw_response
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                max_tokens=300,
+                temperature=0.2  # Lower temperature for more consistent results
+            )
+            raw_response = response.choices[0].message.content.strip()
             
             # Remove all markdown code blocks
-            cleaned_response = re.sub(r'```(json)?\s*|\s*```', '', cleaned_response, flags=re.MULTILINE)
+            cleaned_response = re.sub(r'```(json)?\s*|\s*```', '', raw_response, flags=re.MULTILINE)
             
             # Remove any non-JSON text before/after the JSON object
             json_match = re.search(r'\{.*\}', cleaned_response, re.DOTALL)
@@ -385,9 +338,6 @@ class TextProcessor:
                 logger.debug(f"Problematic response: {cleaned_response[:200]}...")
                 return []
                 
-        except requests.RequestException as e:
-            logger.error(f"API request failed for chunk {chunk_index}: {str(e)}")
-            return []
         except Exception as e:
             logger.error(f"Unexpected error processing chunk {chunk_index}: {str(e)}", exc_info=True)
             return []
@@ -414,30 +364,13 @@ class TextProcessor:
         chunks = self.chunk_text(text)
         texts = [chunk['content'] for chunk in chunks]
         try:
-            if settings.openai_enabled:
-                response = self.client.embeddings.create(
-                    input=texts,
-                    model=settings.openai_embedding_model,
-                    dimensions=1024  # Truncate to 1024 dimensions
-                )
-                embeddings = [item.embedding for item in response.data]
-                logger.info(f"OpenAI embeddings generated with {len(embeddings[0])} dimensions")
-            else:  # Ollama enabled
-                embeddings = []
-                for text in texts:
-                    response = requests.post(
-                        f"http://{settings.ollama_host}:{settings.ollama_port}/api/embeddings",
-                        json={
-                            "model": settings.ollama_embedding_model,
-                            "prompt": text
-                        },
-                        timeout=30
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    logger.debug(f"Ollama response for chunk {chunks[len(embeddings)]['chunk_index']}: {data}")
-                    embeddings.append(data["embedding"])
-                logger.info(f"Ollama embeddings generated with {len(embeddings[0])} dimensions")
+            response = self.client.embeddings.create(
+                input=texts,
+                model=settings.openai_embedding_model,
+                dimensions=1024  # Truncate to 1024 dimensions
+            )
+            embeddings = [item.embedding for item in response.data]
+            logger.info(f"OpenAI embeddings generated with {len(embeddings[0])} dimensions")
 
             result = []
             for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
@@ -449,4 +382,3 @@ class TextProcessor:
         except Exception as e:
             logger.error(f"Embedding generation failed: {str(e)}")
             raise
-        return embeddings

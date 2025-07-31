@@ -13,6 +13,8 @@ from pathlib import Path
 from app.config import settings
 from pyvis.network import Network
 import streamlit.components.v1 as components
+from celery import Celery
+import time
 
 # Set up logging
 Path(settings.data_dir).joinpath("logs").mkdir(parents=True, exist_ok=True)
@@ -26,16 +28,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Validate OpenAI configuration
+if not settings.openai_enabled:
+    logger.error("OpenAI is not enabled. Please set OPENAI_ENABLED to true.")
+    st.error("Application configuration error: OpenAI is not enabled.")
+    st.stop()
+
 # Constants
-FASTAPI_HOST = os.getenv("FASTAPI_HOST", "rag-service")  # Fallback to rag-service if not set
-FASTAPI_PORT = os.getenv("FASTAPI_PORT", "8000")  # Fallback to 8000 if not set
+FASTAPI_HOST = os.getenv("FASTAPI_HOST", "rag-service")
+FASTAPI_PORT = os.getenv("FASTAPI_PORT", "8000")
 BASE_URL = f"http://{FASTAPI_HOST}:{FASTAPI_PORT}"
+CELERY_BROKER_URL = settings.celery_broker_url
+
+# Initialize Celery for inspection
+celery_app = Celery('rag_app', broker=CELERY_BROKER_URL)
 
 class SessionState:
     def __init__(self):
         self._initialize_state()
 
     def _initialize_state(self):
+        logger.debug("Initializing session state")
         if "file_metadata" not in st.session_state:
             st.session_state.file_metadata = []
         if "chat_sessions" not in st.session_state:
@@ -46,10 +59,50 @@ class SessionState:
             st.session_state.selected_docs = []
         if "upload_key" not in st.session_state:
             st.session_state.upload_key = 0
+            logger.debug("Initialized upload_key to 0")
         if "pending_files" not in st.session_state:
-            st.session_state.pending_files = {}  # Track pending files for status polling
+            st.session_state.pending_files = {}
+        if "categories" not in st.session_state:
+            st.session_state.categories = ["submittals", "payrolls", "bank_statements"]
+        logger.debug(f"Session state initialized: {st.session_state}")
 
+# Initialize session state
 session_state = SessionState()
+
+def fetch_categories(user_id: str) -> List[str]:
+    """Fetch categories from the /prompts endpoint."""
+    try:
+        response = requests.get(
+            f"{BASE_URL}/prompts?user_id={user_id}",
+            headers={"X-API-Key": settings.openai_api_key},
+            timeout=10
+        )
+        if response.status_code == 200:
+            prompts = response.json().get("prompts", [])
+            categories = sorted([prompt["category"] for prompt in prompts])
+            logger.debug(f"Fetched {len(categories)} categories: {categories}")
+            return categories
+        else:
+            logger.error(f"Failed to fetch categories: {response.status_code} - {response.text}")
+            st.error(f"Failed to fetch categories: {response.status_code} - {response.text}")
+            return st.session_state.categories
+    except Exception as e:
+        logger.error(f"Error fetching categories: {str(e)}")
+        st.error(f"Error fetching categories: {str(e)}")
+        return st.session_state.categories
+
+def get_celery_status() -> Dict:
+    """Get Celery worker and task status."""
+    try:
+        insp = celery_app.control.inspect()
+        active_tasks = insp.active() or {}
+        worker_count = len(active_tasks)
+        task_count = sum(len(tasks) for tasks in active_tasks.values())
+        logger.debug(f"Celery status: {worker_count} workers, {task_count} active tasks")
+        return {"workers": worker_count, "tasks": task_count}
+    except Exception as e:
+        logger.error(f"Failed to get Celery status: {str(e)}")
+        return {"workers": 0, "tasks": 0}
 
 def update_selected_docs():
     selected = []
@@ -81,7 +134,8 @@ def check_file_status(user_id: str, file_id: str) -> Dict:
     try:
         response = requests.get(
             f"{BASE_URL}/documents?user_id={user_id}",
-            headers={"X-API-Key": settings.openai_api_key}
+            headers={"X-API-Key": settings.openai_api_key},
+            timeout=10
         )
         if response.status_code == 200:
             documents = response.json().get("documents", [])
@@ -97,7 +151,15 @@ def check_file_status(user_id: str, file_id: str) -> Dict:
 def render_document_management(user_id: str):
     st.sidebar.title("Document Management")
 
+    # Fetch categories dynamically
+    categories = fetch_categories(user_id)
+    upload_categories = categories + ["other"]
+
     with st.sidebar.expander("Upload Documents", expanded=True):
+        if "upload_key" not in st.session_state:
+            st.session_state.upload_key = 0
+            logger.warning("upload_key was not initialized, set to 0")
+
         uploaded_files = st.file_uploader(
             "Upload files",
             type=(
@@ -110,7 +172,7 @@ def render_document_management(user_id: str):
             accept_multiple_files=True,
             key=f"file_uploader_{st.session_state.upload_key}"
         )
-        category = st.selectbox("Category", ["submittals", "payrolls", "bank_statements", "other"], index=0)
+        category = st.selectbox("Category", upload_categories, index=0)
 
         if uploaded_files and not st.session_state.get("upload_trigger", False):
             st.session_state.upload_trigger = True
@@ -160,23 +222,40 @@ def render_document_management(user_id: str):
                 st.success(f"Uploaded {success_count} file(s). Processing in background...")
                 st.session_state.pending_files.update({f["file_id"]: f for f in pending_files})
                 st.session_state.upload_key += 1
+                st.session_state.categories = fetch_categories(user_id)
             if error_messages:
                 for error in error_messages:
                     st.error(error)
             st.session_state.upload_trigger = False
 
-    # Poll status for pending files
+    # Display Celery worker and task status
+    st.sidebar.markdown("### Processing Status")
+    celery_status = get_celery_status()
+    st.sidebar.write(f"Active Workers: {celery_status['workers']}")
+    st.sidebar.write(f"Files Processing: {celery_status['tasks']}")
+
+    # Poll status for pending files with auto-refresh
     if st.session_state.pending_files:
-        with st.sidebar.expander("Processing Status"):
-            for file_id, file_info in list(st.session_state.pending_files.items()):
-                status_info = check_file_status(user_id, file_id)
-                st.write(f"{file_info['filename']}: {status_info['status'].capitalize()}")
-                if status_info["status"] in ["processed", "failed"]:
-                    del st.session_state.pending_files[file_id]
-                if status_info["status"] == "error":
-                    st.error(f"Error checking status for {file_info['filename']}: {status_info.get('error', 'Unknown error')}")
-            if st.session_state.pending_files:
-                st.button("Refresh Status", key="refresh_status", on_click=st.rerun)
+        with st.sidebar.expander("File Processing Status", expanded=True):
+            status_container = st.empty()
+            refresh_interval = 5  # Seconds between auto-refreshes
+            for _ in range(60):  # Limit to 5 minutes to prevent infinite loop
+                if not st.session_state.pending_files:
+                    break
+                with status_container.container():
+                    for file_id, file_info in list(st.session_state.pending_files.items()):
+                        status_info = check_file_status(user_id, file_id)
+                        st.write(f"{file_info['filename']}: {status_info['status'].capitalize()}")
+                        if status_info["status"] in ["processed", "failed"]:
+                            del st.session_state.pending_files[file_id]
+                        if status_info["status"] == "error":
+                            st.error(f"Error checking status for {file_info['filename']}: {status_info.get('error', 'Unknown error')}")
+                    if st.session_state.pending_files:
+                        st.button("Manual Refresh", key="refresh_status", on_click=lambda: None)
+                        st.write(f"Auto-refreshing in {refresh_interval} seconds...")
+                        time.sleep(refresh_interval)
+                        st.rerun()  # Updated to st.rerun()
+            status_container.empty()
 
     st.sidebar.markdown("### Uploaded Documents")
     try:
@@ -213,8 +292,8 @@ def render_document_management(user_id: str):
                                 st.caption(f"{file['file_type']} - {file['upload_date']} - {file['size']/1024:.1f} KB")
                                 category = st.selectbox(
                                     "Category",
-                                    ["submittals", "payrolls", "bank_statements", "other"],
-                                    index=["submittals", "payrolls", "bank_statements", "other"].index(file['category'] or "other"),
+                                    upload_categories,
+                                    index=upload_categories.index(file['category'] or "other"),
                                     key=f"category_{file['file_id']}"
                                 )
                                 if category != file['category']:
@@ -303,6 +382,7 @@ def render_prompt_management(user_id: str):
                     )
                     if response.status_code == 200:
                         st.success("Prompt saved successfully")
+                        st.session_state.categories = fetch_categories(user_id)
                         st.rerun()
                     else:
                         error_msg = f"Failed to save prompt: {response.status_code} - {response.text}"
@@ -336,6 +416,7 @@ def render_prompt_management(user_id: str):
                             )
                             if response.status_code == 200:
                                 st.success(f"Prompt {prompt['category']} deleted")
+                                st.session_state.categories = fetch_categories(user_id)
                                 st.rerun()
                             else:
                                 error_msg = f"Failed to delete prompt: {response.status_code} - {response.text}"
@@ -425,15 +506,15 @@ def render_entity_graph(sources: List[Dict]):
             nodes.add(entity)
             node_types[entity] = "entity"
         for rel in relationships:
-            source_node = rel.get("source")
-            target_node = rel.get("target")
-            relation = rel.get("relation")
-            if source_node and target_node:
-                nodes.add(source_node)
-                nodes.add(target_node)
-                node_types[source_node] = "entity"
-                node_types[target_node] = "entity"
-                net.add_edge(source_node, target_node, label=relation, title=f"From {filename}")
+            subject = rel.get("subject")
+            object_ = rel.get("object")
+            predicate = rel.get("predicate")
+            if subject and object_:
+                nodes.add(subject)
+                nodes.add(object_)
+                node_types[subject] = "entity"
+                node_types[object_] = "entity"
+                net.add_edge(subject, object_, label=predicate, title=f"From {filename}")
 
     for node in nodes:
         net.add_node(node, label=node, title=node_types.get(node, "entity"), color="#ADD8E6")
@@ -454,12 +535,16 @@ def main():
     st.set_page_config(page_title="PDFLLM RAG App", layout="wide", initial_sidebar_state="expanded")
     user_id = "default_user"
 
+    # Fetch categories dynamically
+    categories = fetch_categories(user_id)
+    query_categories = ["all"] + categories
+
     render_document_management(user_id)
     render_prompt_management(user_id)
     render_chat_sessions(user_id)
 
     st.title("PDFLLM RAG App")
-    category = st.selectbox("Query Category", ["all", "submittals", "payrolls", "bank_statements"], index=0)
+    category = st.selectbox("Query Category", query_categories, index=0)
 
     if st.session_state.current_chat_id:
         chat_data = st.session_state.chat_sessions.get(st.session_state.current_chat_id, {})

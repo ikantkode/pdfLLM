@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS prompts (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     user_id TEXT NOT NULL,
-    UNIQUE(category, user_id)
+    CONSTRAINT unique_category_user UNIQUE (category, user_id)
 );
 
 -- Seed default prompts
@@ -70,7 +70,8 @@ INSERT INTO prompts (category, prompt, user_id) VALUES
 3. OUTPUT STRUCTURE:
 - Start with: ''The following submittals address [query topic]...''.
 - Provide a table of relevant submittals.
-- End with: ''Source: [filename], section [X]''.', 'default_user') ON CONFLICT DO NOTHING;
+- End with: ''Source: [filename], section [X]''.', 'default_user') 
+ON CONFLICT ON CONSTRAINT unique_category_user DO NOTHING;
 
 INSERT INTO prompts (category, prompt, user_id) VALUES 
 ('bank_statements', 'You are an analyst for bank statements. STRICTLY follow these rules:
@@ -84,7 +85,8 @@ INSERT INTO prompts (category, prompt, user_id) VALUES
 3. OUTPUT STRUCTURE:
 - Start with: ''The following transactions address [query topic]...''.
 - Provide a table of relevant transactions.
-- End with: ''Source: [filename], section [X]''.', 'default_user') ON CONFLICT DO NOTHING;
+- End with: ''Source: [filename], section [X]''.', 'default_user') 
+ON CONFLICT ON CONSTRAINT unique_category_user DO NOTHING;
 
 INSERT INTO prompts (category, prompt, user_id) VALUES 
 ('payrolls', 'You are an analyst for payrolls. STRICTLY follow these rules:
@@ -98,7 +100,8 @@ INSERT INTO prompts (category, prompt, user_id) VALUES
 3. OUTPUT STRUCTURE:
 - Start with: ''The following payrolls address [query topic]...''.
 - Provide a table of relevant payrolls.
-- End with: ''Source: [filename], section [X]''.', 'default_user') ON CONFLICT DO NOTHING;
+- End with: ''Source: [filename], section [X]''.', 'default_user') 
+ON CONFLICT ON CONSTRAINT unique_category_user DO NOTHING;
 
 INSERT INTO prompts (category, prompt, user_id) VALUES 
 ('all', 'You are a construction document analyst handling queries across multiple document categories. STRICTLY follow these rules:
@@ -113,4 +116,5 @@ INSERT INTO prompts (category, prompt, user_id) VALUES
 3. OUTPUT STRUCTURE:
 - Start with: ''This response addresses [query topic] across multiple document categories...''.
 - Provide sections for each category.
-- End with: ''Source: [filename], section [X]''.', 'default_user') ON CONFLICT DO NOTHING;
+- End with: ''Source: [filename], section [X]''.', 'default_user') 
+ON CONFLICT ON CONSTRAINT unique_category_user DO NOTHING;
