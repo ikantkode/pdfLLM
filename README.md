@@ -1,6 +1,6 @@
 # pdfLLM - Document Processing and Retrieval-Augmented Generation
 
-`pdfLLM` is a Django-based Retrieval-Augmented Generation (RAG) microservice designed for processing, embedding, and querying documents. It integrates document parsing, semantic search, knowledge graph construction, and LLM-based generation to provide advanced document intelligence. Built with scalability in mind, it uses PostgreSQL for session management, Qdrant for vector storage, Dgraph for graph-based indexing, and Celery for asynchronous task processing.
+`pdfLLM` is a Retrieval-Augmented Generation (RAG) microservice designed for processing, embedding, and querying documents. It integrates document parsing, semantic search, knowledge graph construction, and LLM-based generation to provide advanced document intelligence. Built with scalability in mind, it uses PostgreSQL for session management, Qdrant for vector storage, Dgraph for graph-based indexing, and Celery for asynchronous task processing.
 
 ## Change Log
 
@@ -26,6 +26,7 @@ The application supports multiple embedding and chat models, with a focus on cos
 | **Mistral** | mistral-embed               | 1,024      | 32,768     | $0.010                |
 
 **Recommendation**: OpenAI's `text-embedding-3-small` and `gpt-4o-mini` are highly cost-effective and reliable for most use cases. For large documents, chunks are processed within an 8,000-token limit to ensure compatibility with Qdrant and Dgraph.
+**As of 07/31/2025**: I want to try in Qwen3-Embedding-0.6B and Qwen3-30B-A3B (non-thinking/instruct) for retrieval. I am legitimately flabbergasted at the performance. The Qwen team done out did it all. VLLM would have openAI compatible endpoints and essentially, this would be a plug and play. If I do it, I will share docker stuff for it.
 
 ### Example Use Case
 Organize a business's document corpus (e.g., inventory receipts, payroll, utility bills) into categories. Use category-specific prompts like "Summarize inventory spending" to generate modular summaries stored in PostgreSQL. Combine these summaries with a master prompt (e.g., "How much was spent on the store?") using `gpt-4o-mini` (128,000-token context window) for a coherent, hybrid response.
