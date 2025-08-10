@@ -26,6 +26,7 @@ from app.converters import image_converter, doc_converter, excel_converter, txt_
 from app.celery_app import celery_app
 from app.utils.helpers import preprocess_ocr_text, classify_document, get_db_connection
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, MatchAny
+from psycopg2.extras import Json  # Added to fix NameError
 
 # Initialize tokenizer
 tokenizer = tiktoken.get_encoding("cl100k_base")
