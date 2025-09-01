@@ -12,6 +12,7 @@
   - Added "Master Chat" and "Category Chat" features for querying across all documents or specific categories, with orchestration chain in progress.
   - PostgreSQL runs on a non-standard port to avoid conflicts with existing installations.
 - **07/27/2025**: Initial support for asynchronous multi-file uploads and category-based prompts.
+- **08/31/2025**: Integrated [`exaOCR`](https://github.com/ikantkode/exaOCR) into the app.
 
 ## Context Size of Models
 
