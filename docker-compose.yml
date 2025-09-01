@@ -1,11 +1,11 @@
-version: '3.8'
-
 services:
   rag-service:
     build:
       context: .
       dockerfile: Dockerfile
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    user: 1000:1000
+    entrypoint: ["/bin/sh", "-c", "mkdir -p /app/data/logs && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
     ports:
       - "8000:8000"
     volumes:
@@ -79,6 +79,8 @@ services:
       context: .
       dockerfile: Dockerfile
     command: celery -A app.celery_app worker --loglevel=info
+    user: 1000:1000
+    entrypoint: ["/bin/sh", "-c", "mkdir -p /app/data/logs && exec celery -A app.celery_app worker --loglevel=info"]
     volumes:
       - ./data:/app/data
       - ./data/logs:/app/data/logs
@@ -98,6 +100,7 @@ services:
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
       - QDRANT_HOST=${QDRANT_HOST:-qdrant}
       - QDRANT_PORT=${QDRANT_PORT:-6333}
+      - OCRMYPDF_LOG_LEVEL=ERROR  # Reduce ocrmypdf log verbosity
     depends_on:
       postgres:
         condition: service_healthy

@@ -141,12 +141,17 @@ def check_file_status(user_id: str, file_id: str) -> Dict:
             documents = response.json().get("documents", [])
             for doc in documents:
                 if doc["file_id"] == file_id:
-                    return {"file_id": file_id, "status": doc["status"], "filename": doc["filename"]}
+                    return {
+                        "file_id": file_id,
+                        "status": doc["status"],
+                        "filename": doc["filename"],
+                        "last_error": doc.get("last_error")
+                    }
         logger.error(f"Failed to check status for file_id {file_id}: {response.status_code} - {response.text}")
-        return {"file_id": file_id, "status": "unknown", "filename": "Unknown"}
+        return {"file_id": file_id, "status": "unknown", "filename": "Unknown", "last_error": None}
     except Exception as e:
         logger.error(f"Error checking file status for {file_id}: {str(e)}")
-        return {"file_id": file_id, "status": "error", "filename": "Unknown", "error": str(e)}
+        return {"file_id": file_id, "status": "error", "filename": "Unknown", "last_error": str(e)}
 
 def render_document_management(user_id: str):
     st.sidebar.title("Document Management")
@@ -232,29 +237,46 @@ def render_document_management(user_id: str):
     st.sidebar.markdown("### Processing Status")
     celery_status = get_celery_status()
     st.sidebar.write(f"Active Workers: {celery_status['workers']}")
-    st.sidebar.write(f"Files Processing: {celery_status['tasks']}")
+    pending_count = len([f for f in st.session_state.pending_files.values() if f["status"] in ["pending", "processing"]])
+    st.sidebar.write(f"Files Processing: {pending_count}")
 
-    # Poll status for pending files with auto-refresh
+    # Poll status for pending files
     if st.session_state.pending_files:
         with st.sidebar.expander("File Processing Status", expanded=True):
             status_container = st.empty()
-            refresh_interval = 5  # Seconds between auto-refreshes
-            for _ in range(60):  # Limit to 5 minutes to prevent infinite loop
-                if not st.session_state.pending_files:
-                    break
+            refresh_interval = 10  # Increased to reduce polling frequency
+            max_attempts = 30  # Limit to 5 minutes (30 * 10s = 300s)
+            attempt = 0
+            while st.session_state.pending_files and attempt < max_attempts:
                 with status_container.container():
+                    updated_pending_files = {}
                     for file_id, file_info in list(st.session_state.pending_files.items()):
                         status_info = check_file_status(user_id, file_id)
-                        st.write(f"{file_info['filename']}: {status_info['status'].capitalize()}")
-                        if status_info["status"] in ["processed", "failed"]:
-                            del st.session_state.pending_files[file_id]
-                        if status_info["status"] == "error":
-                            st.error(f"Error checking status for {file_info['filename']}: {status_info.get('error', 'Unknown error')}")
+                        status_color = {
+                            "processed": "green",
+                            "failed": "red",
+                            "pending": "orange",
+                            "processing": "orange",
+                            "error": "red",
+                            "unknown": "gray"
+                        }.get(status_info["status"], "gray")
+                        st.markdown(
+                            f"{file_info['filename']}: <span style='color:{status_color}'>{status_info['status'].capitalize()}</span>"
+                            f"{' - ' + status_info['last_error'] if status_info['last_error'] else ''}",
+                            unsafe_allow_html=True
+                        )
+                        if status_info["status"] in ["processed", "failed", "error"]:
+                            logger.info(f"File {file_info['filename']} reached final status: {status_info['status']}")
+                        else:
+                            updated_pending_files[file_id] = file_info
+                            updated_pending_files[file_id]["status"] = status_info["status"]
+                    st.session_state.pending_files = updated_pending_files
                     if st.session_state.pending_files:
-                        st.button("Manual Refresh", key="refresh_status", on_click=lambda: None)
+                        st.button("Manual Refresh", key=f"refresh_status_{attempt}", on_click=lambda: None)
                         st.write(f"Auto-refreshing in {refresh_interval} seconds...")
                         time.sleep(refresh_interval)
-                        st.rerun()  # Updated to st.rerun()
+                        attempt += 1
+                        st.rerun()
             status_container.empty()
 
     st.sidebar.markdown("### Uploaded Documents")
@@ -290,6 +312,8 @@ def render_document_management(user_id: str):
                                 ):
                                     pass
                                 st.caption(f"{file['file_type']} - {file['upload_date']} - {file['size']/1024:.1f} KB")
+                                if file.get("last_error"):
+                                    st.caption(f"Error: {file['last_error']}")
                                 category = st.selectbox(
                                     "Category",
                                     upload_categories,

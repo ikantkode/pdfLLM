@@ -1,40 +1,28 @@
-# Core dependencies
 fastapi==0.115.0
 uvicorn==0.30.6
-streamlit==1.39.0
-psycopg2-binary==2.9.9
-celery==5.4.0
-redis==5.0.8
-
-# Document processing
-pytesseract==0.3.13
-Pillow==10.4.0
-python-docx==1.1.2
-openpyxl==3.1.5
-pdf2image==1.17.0
-PyPDF2==3.0.1
+streamlit==1.38.0
+ocrmypdf==16.5.0
+img2pdf==0.5.1
+pymupdf4llm==0.0.17
+pymupdf==1.24.10
+pillow==10.4.0
+python-multipart==0.0.9
 python-magic==0.4.27
-lxml==5.3.0
-xlrd==2.0.1
-
-# Data handling
-pandas==2.2.3
-numpy==1.26.4
-tabulate==0.9.0
-
-# AI/ML components
-openai==1.51.0
-tiktoken==0.8.0
-qdrant-client==1.12.0
-spacy==3.7.6
-tenacity==8.5.0
-nltk==3.9.1
-
-# Web/API utilities
-python-multipart==0.0.12
-httpx==0.27.0
-python-dotenv==1.0.1
-pydantic-settings==2.5.2
-
-# Graph Visualization
-pyvis==0.3.2
+openai
+tiktoken
+tenacity
+pydantic
+pydantic-settings>=2.0.0
+qdrant-client
+psycopg2
+celery
+spacy
+nltk
+pyvis
+requests
+pdf2image
+pytesseract>=0.3.10
+openpyxl>=3.1.0
+xlrd>=2.0.1
+tabulate>=0.9.0
+redis>=5.0.0  # Added for Celery Redis transport

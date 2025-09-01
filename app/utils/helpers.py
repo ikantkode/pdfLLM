@@ -5,17 +5,27 @@ import psycopg2
 from tenacity import retry, stop_after_attempt, wait_exponential
 from app.config import settings
 from app.utils.text_processor import TextProcessor
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 import tiktoken
+import asyncio
 
 # Initialize tokenizer
 tokenizer = tiktoken.get_encoding("cl100k_base")
 
-# Initialize TextProcessor
-text_processor = TextProcessor()
-
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Initialize TextProcessor with openai_api_key
+try:
+    openai_api_key = settings.openai_api_key
+    if not openai_api_key:
+        logger.error("OPENAI_API_KEY is not set in settings")
+        raise ValueError("OPENAI_API_KEY is required for TextProcessor initialization")
+    text_processor = TextProcessor(openai_api_key=openai_api_key)
+    logger.info("TextProcessor initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize TextProcessor: {str(e)}", exc_info=True)
+    raise
 
 def get_db_connection():
     try:
@@ -119,7 +129,7 @@ async def preprocess_ocr_text(text: str) -> str:
     chunks = split_large_text(text, max_tokens=settings.max_embedding_tokens // 2)
     cleaned_chunks = []
 
-    client = OpenAI(api_key=settings.openai_api_key)
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
 
     for chunk in chunks:
         try:
@@ -145,7 +155,7 @@ async def preprocess_ocr_text(text: str) -> str:
                 "11. Stay under the token budget.\n"
             )
 
-            response = client.chat.completions.create(
+            response = await client.chat.completions.create(
                 model=settings.openai_chat_model,
                 messages=[
                     {

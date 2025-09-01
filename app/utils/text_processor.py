@@ -1,27 +1,16 @@
 import re
-import json
 import logging
-from typing import List, Dict, Any, Tuple
 import spacy
-from openai import OpenAI
 import tiktoken
+from typing import List, Tuple, Dict, Any
+from openai import AsyncOpenAI, OpenAIError
 from app.config import settings
-from tenacity import retry, stop_after_attempt, wait_exponential
-import nltk
-from nltk.tokenize import sent_tokenize
+import asyncio
 
-# Download required NLTK data
-nltk.download('punkt', quiet=True)
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO if not settings.debug else logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 class TextProcessor:
-    def __init__(self):
+    def __init__(self, openai_api_key: str):
         try:
             self.nlp = spacy.load("en_core_web_sm")
             logger.info("Spacy model loaded successfully")
@@ -29,356 +18,224 @@ class TextProcessor:
             logger.error(f"Failed to load Spacy model: {str(e)}")
             raise
 
-        # Validate provider settings
-        if not settings.openai_enabled:
-            logger.error("OpenAI is not enabled. Please set OPENAI_ENABLED to true.")
-            raise ValueError("Invalid configuration: OPENAI_ENABLED must be set to true.")
-
-        # Initialize OpenAI client
         try:
-            self.client = OpenAI(api_key=settings.openai_api_key)
+            self.client = AsyncOpenAI(api_key=openai_api_key)
             logger.info("OpenAI client initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize OpenAI client: {str(e)}")
             raise
 
-        # Initialize tokenizer
         try:
             self.tokenizer = tiktoken.encoding_for_model(settings.openai_embedding_model)
             logger.info(f"Tokenizer initialized for OpenAI model: {settings.openai_embedding_model}")
         except Exception as e:
-            logger.error(f"Tokenizer initialization failed: {str(e)}")
+            logger.error(f"Failed to initialize tokenizer: {str(e)}")
             raise
 
-        self.max_tokens = settings.max_embedding_tokens
+        self.max_tokens = settings.max_embedding_tokens // 2  # 4095 for text-embedding-3-small
+        self.overlap = 200
+
+    def chunk_text(self, text: str, max_tokens: int = None) -> List[Dict[str, Any]]:
+        if max_tokens is None:
+            max_tokens = self.max_tokens
+
+        try:
+            tokens = self.tokenizer.encode(text)
+            if len(tokens) <= max_tokens:
+                return [{"content": text, "start": 0, "end": len(text)}]
+
+            chunks = []
+            current_pos = 0
+            text_length = len(text)
+
+            while current_pos < text_length:
+                end_pos = current_pos
+                current_tokens = 0
+                doc = self.nlp(text[current_pos:])
+
+                for sent in doc.sents:
+                    sent_text = sent.text
+                    sent_tokens = len(self.tokenizer.encode(sent_text))
+                    if current_tokens + sent_tokens > max_tokens:
+                        if current_tokens > 0:
+                            chunk_text = text[current_pos:end_pos]
+                            chunks.append({"content": chunk_text.strip(), "start": current_pos, "end": end_pos})
+                            current_pos = max(end_pos - self.overlap, 0)
+                            current_tokens = 0
+                            break
+                        else:
+                            sub_chunks = []
+                            sub_start = current_pos
+                            for i in range(0, len(sent_text), max_tokens):
+                                sub_chunk = sent_text[i:i + max_tokens]
+                                sub_end = sub_start + len(sub_chunk)
+                                sub_chunks.append({"content": sub_chunk.strip(), "start": sub_start, "end": sub_end})
+                                sub_start = sub_end
+                            chunks.extend(sub_chunks)
+                            current_pos = sub_end
+                            current_tokens = 0
+                            break
+                    else:
+                        current_tokens += sent_tokens
+                        end_pos += len(sent_text)
+
+                if current_tokens > 0 and end_pos > current_pos:
+                    chunk_text = text[current_pos:end_pos]
+                    chunks.append({"content": chunk_text.strip(), "start": current_pos, "end": end_pos})
+                    current_pos = max(end_pos - self.overlap, 0)
+                    current_tokens = 0
+
+                if end_pos >= text_length:
+                    break
+
+            logger.info(f"Chunked text into {len(chunks)} chunks with max {max_tokens} tokens")
+            return chunks
+        except Exception as e:
+            logger.error(f"Failed to chunk text: {str(e)}")
+            raise
+
+    async def generate_embeddings(self, text: str) -> List[Tuple[str, List[float]]]:
+        try:
+            chunks = self.chunk_text(text)
+            embeddings = []
+            for chunk in chunks:
+                try:
+                    response = await self.client.embeddings.create(
+                        input=chunk["content"],
+                        model=settings.openai_embedding_model,
+                        encoding_format="float",
+                        dimensions=1024  # Match Qdrant collection configuration
+                    )
+                    embedding = response.data[0].embedding
+                    logger.info(f"Generated embedding for chunk with {len(self.tokenizer.encode(chunk['content']))} tokens, dimensions: {len(embedding)}")
+                    embeddings.append((chunk["content"], embedding))
+                except OpenAIError as e:
+                    if "maximum context length" in str(e):
+                        logger.warning(f"Chunk too large, retrying with smaller size: {str(e)}")
+                        sub_chunks = self.chunk_text(chunk["content"], max_tokens=self.max_tokens // 2)
+                        for sub_chunk in sub_chunks:
+                            response = await self.client.embeddings.create(
+                                input=sub_chunk["content"],
+                                model=settings.openai_embedding_model,
+                                encoding_format="float",
+                                dimensions=1024  # Match Qdrant collection configuration
+                            )
+                            embedding = response.data[0].embedding
+                            logger.info(f"Generated embedding for sub-chunk with {len(self.tokenizer.encode(sub_chunk['content']))} tokens, dimensions: {len(embedding)}")
+                            embeddings.append((sub_chunk["content"], embedding))
+                    else:
+                        logger.error(f"Embedding generation failed for chunk: {str(e)}")
+                        raise
+            return embeddings
+        except Exception as e:
+            logger.error(f"Embedding generation failed: {str(e)}")
+            raise
 
     def clean_markdown(self, text: str) -> str:
-        """More aggressive cleaning for RAG contexts"""
-        # Fix space-separated characters
-        text = re.sub(r'(\w)\s+(\w)\s+(\w)\s+(\w)', r'\1\2\3\4', text)
-        text = re.sub(r'(\w)\s+(\w)\s+(\w)', r'\1\2\3', text) 
-        text = re.sub(r'(\w)\s+(\w)', r'\1\2', text)
-        
-        # Fix numbers
-        text = re.sub(r'(\d)\s+([,.])\s+(\d)', r'\1\2\3', text)
-        text = re.sub(r'(\d)\s+(\d{3})\s+(\d{3})', r'\1,\2,\3', text)
-        
-        # Remove OCR artifacts
-        text = re.sub(r'[\x00-\x1F]', ' ', text)  # Control chars
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text
-    
-    def chunk_text(self, text: str, max_tokens: int = None) -> List[Dict]:
-        """Split text into chunks, preserving table structures, using tiktoken for accurate token counting"""
-        max_tokens = max_tokens or self.max_tokens
-        table_pattern = r'(\|.*?\|\n(?:\|[-: ]+\|\n)+.*?)(?=\n\n|\Z)'
-        tables = re.findall(table_pattern, text, re.DOTALL)
-        non_table_text = re.sub(table_pattern, 'TABLE_PLACEHOLDER', text)
-
-        chunks = []
-        current_chunk = []
-        current_token_count = 0
-        chunk_index = 0
-        placeholder_count = 0
-
-        doc = self.nlp(non_table_text)
-        for sent in doc.sents:
-            sent_text = sent.text
-            if 'TABLE_PLACEHOLDER' in sent_text:
-                if placeholder_count < len(tables):
-                    table_text = tables[placeholder_count]
-                    table_tokens = len(self.tokenizer.encode(table_text))
-                    if table_tokens > max_tokens:
-                        rows = table_text.split('\n')
-                        sub_chunk = []
-                        sub_tokens = 0
-                        for row in rows:
-                            row_tokens = len(self.tokenizer.encode(row))
-                            if sub_tokens + row_tokens > max_tokens:
-                                if sub_chunk:
-                                    chunks.append({
-                                        "content": "\n".join(sub_chunk).strip(),
-                                        "chunk_index": chunk_index,
-                                        "parent_section": self._extract_section("\n".join(sub_chunk)),
-                                        "entities": [],
-                                        "relationships": []
-                                    })
-                                    chunk_index += 1
-                                    sub_chunk = []
-                                    sub_tokens = 0
-                                sub_chunk.append(row)
-                                sub_tokens += row_tokens
-                            else:
-                                sub_chunk.append(row)
-                                sub_tokens += row_tokens
-                        if sub_chunk:
-                            chunks.append({
-                                "content": "\n".join(sub_chunk).strip(),
-                                "chunk_index": chunk_index,
-                                "parent_section": self._extract_section("\n".join(sub_chunk)),
-                                "entities": [],
-                                "relationships": []
-                            })
-                            chunk_index += 1
-                        placeholder_count += 1
-                        continue
-                    else:
-                        sent_text = sent_text.replace('TABLE_PLACEHOLDER', table_text)
-                        placeholder_count += 1
-
-            sent_tokens = len(self.tokenizer.encode(sent_text))
-            if current_token_count + sent_tokens > max_tokens:
-                if current_chunk:
-                    chunks.append({
-                        "content": "\n".join(current_chunk).strip(),
-                        "chunk_index": chunk_index,
-                        "parent_section": self._extract_section("\n".join(current_chunk)),
-                        "entities": [],
-                        "relationships": []
-                    })
-                    chunk_index += 1
-                    current_chunk = []
-                    current_token_count = 0
-
-            current_chunk.append(sent_text)
-            current_token_count += sent_tokens
-
-        if current_chunk:
-            chunks.append({
-                "content": "\n".join(current_chunk).strip(),
-                "chunk_index": chunk_index,
-                "parent_section": self._extract_section("\n".join(current_chunk)),
-                "entities": [],
-                "relationships": []
-            })
-            chunk_index += 1
-
-        while placeholder_count < len(tables):
-            table_text = tables[placeholder_count]
-            table_tokens = len(self.tokenizer.encode(table_text))
-            if table_tokens <= max_tokens:
-                chunks.append({
-                    "content": table_text.strip(),
-                    "chunk_index": chunk_index,
-                    "parent_section": self._extract_section(table_text),
-                    "entities": [],
-                    "relationships": []
-                })
-                chunk_index += 1
-            else:
-                rows = table_text.split('\n')
-                sub_chunk = []
-                sub_tokens = 0
-                for row in rows:
-                    row_tokens = len(self.tokenizer.encode(row))
-                    if sub_tokens + row_tokens > max_tokens:
-                        if sub_chunk:
-                            chunks.append({
-                                "content": "\n".join(sub_chunk).strip(),
-                                "chunk_index": chunk_index,
-                                "parent_section": self._extract_section("\n".join(sub_chunk)),
-                                "entities": [],
-                                "relationships": []
-                            })
-                            chunk_index += 1
-                            sub_chunk = []
-                            sub_tokens = 0
-                        sub_chunk.append(row)
-                        sub_tokens += row_tokens
-                    else:
-                        sub_chunk.append(row)
-                        sub_tokens += row_tokens
-                if sub_chunk:
-                    chunks.append({
-                        "content": "\n".join(sub_chunk).strip(),
-                        "chunk_index": chunk_index,
-                        "parent_section": self._extract_section("\n".join(sub_chunk)),
-                        "entities": [],
-                        "relationships": []
-                    })
-                    chunk_index += 1
-                placeholder_count += 1
-
-        logger.info(f"Chunked text into {len(chunks)} chunks with max {max_tokens} tokens")
-        return chunks
-
-    def _extract_section(self, text: str) -> str:
-        """Extract the parent section from markdown text"""
-        lines = text.split('\n')
-        for line in lines:
-            if line.startswith('#'):
-                return line.strip('# ').strip() or "N/A"
-        return "N/A"
-
-    async def extract_entities(self, text: str) -> List[str]:
-        """Extract and sanitize entities from text, removing newlines and metadata like 'Date'"""
         try:
-            doc = self.nlp(text)
-            entities = []
-            for ent in doc.ents:
-                if ent.label_ in ["PERSON", "ORG", "GPE", "NORP", "PRODUCT", "EVENT"]:
-                    cleaned_entity = self._sanitize_entity(ent.text)
-                    if (cleaned_entity and len(cleaned_entity) <= 255 and 
-                        not self._contains_metadata(cleaned_entity)):
-                        entities.append(cleaned_entity)
-            entities = list(set(entities))
-            logger.debug(f"Extracted entities: {entities}")
-            return entities
+            text = re.sub(r'\s+', ' ', text).strip()
+            text = re.sub(r'(?<=\w)\n(?=\w)', ' ', text)
+            text = re.sub(r'\n{2,}', '\n\n', text)
+            logger.info("Cleaned markdown text")
+            return text
         except Exception as e:
-            logger.error(f"Entity extraction failed: {str(e)}")
-            return []
+            logger.error(f"Failed to clean markdown: {str(e)}")
+            raise
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        reraise=True
-    )
-    async def extract_relationships(self, chunk: Dict) -> List[Dict]:
-        """Extract relationships from chunk, ensuring subjects and objects are sanitized."""
-        # Validate input
-        if not isinstance(chunk, dict) or 'content' not in chunk:
-            logger.error("Invalid chunk format - missing 'content' key")
-            return []
-        
-        content = str(chunk['content'])[:10000]  # Truncate very long content to prevent API issues
-        chunk_index = chunk.get('chunk_index', 'unknown')
-        
-        prompt = (
-            "Extract precise relationships (e.g., 'person works at organization', 'entity is located in place') "
-            "from the following text. Return a JSON object with a 'relationships' key containing a list of "
-            "{subject, predicate, object} dictionaries. Follow these rules:\n"
-            "1. Ensure response is valid JSON\n"
-            "2. Relationships must be specific and meaningful\n"
-            "3. Sanitize subjects/objects (remove newlines, tabs, excessive spaces)\n"
-            "4. Exclude entities containing 'Date' or 'Signature'\n"
-            "5. If no relationships, return {'relationships': []}\n"
-            "6. No markdown code blocks or extra text\n\n"
-            f"Text: {content}\n\n"
-            "Example output:\n"
-            "{\"relationships\": [{\"subject\": \"John Doe\", \"predicate\": \"works at\", \"object\": \"Acme Corp\"}]}"
-        )
-
+    async def preprocess_ocr_text(self, text: str, file_id: str, filename: str) -> str:
         try:
-            response = self.client.chat.completions.create(
+            prompt = (
+                f"Input Text:\n{text[:settings.max_completion_tokens]}\n\n"
+                "You are a document cleaner. Remove all OCR artifacts first, then re-format the remainder.\n\n"
+                "Step-0 (MANDATORY): Collapse every space inside a token (words, names, numbers, currency, dates). "
+                "Example: ‘1 , 0 0 0 , 0 0 0’ → ‘1,000,000’, ‘A d d i t i o n a l’ → ‘Additional’. "
+                "Do not remove spaces that separate distinct tokens.\n\n"
+                "Steps 1-11:\n"
+                "1. Reconstruct the text into clear, grammatical, logically structured content.\n"
+                "2. Standardize numbers and currency (single ‘$’, commas for thousands, two decimals).\n"
+                "3. Rejoin broken names/words that remain after Step-0.\n"
+                "4. Separate metadata labels (Date, Signature, etc.) from the preceding name/value.\n"
+                "5. Preserve markdown headings, lists, and tables; ensure tables are well-aligned.\n"
+                "6. If payroll data (employee, role, hours, rate, gross/net pay) is present:\n"
+                "   - Render it in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay.\n"
+                "   - Validate: Gross Pay ≈ Hours × Rate, Net Pay < Gross Pay. Note any assumptions.\n"
+                "7. If not payroll-related, simply return clean markdown prose.\n"
+                "8. Remove gibberish or noise; keep all meaningful data.\n"
+                "9. Comment assumptions with <!-- ... -->.\n"
+                "10. Return only the cleaned markdown.\n"
+                "11. Stay under the token budget.\n"
+            )
+
+            response = await self.client.chat.completions.create(
                 model=settings.openai_chat_model,
                 messages=[
                     {
                         "role": "system",
                         "content": (
-                            "You are an expert relationship extractor. Follow these rules:\n"
-                            "1. Return ONLY valid JSON with {'relationships': [...]}\n"
-                            "2. Each relationship must have subject, predicate, object\n"
-                            "3. Sanitize text (no newlines/tabs, minimal spaces)\n"
-                            "4. Exclude Date/Signature entities\n"
-                            "5. No explanations or extra text\n"
-                            "6. If uncertain, omit the relationship"
+                            "You are an expert at cleaning and reconstructing noisy OCR-extracted text. "
+                            "Correct OCR errors, including spaces between characters in words, names, or numbers. "
+                            "Format numbers and names properly, ensuring single '$' for currency, and structure the output in clear, coherent markdown. "
+                            "Preserve meaningful information and structural elements (e.g., lists, tables). "
+                            "For payroll data, format details in a markdown table with columns: Employee, Role, Hours, Rate, Gross Pay, Net Pay. "
+                            "Validate numerical consistency: Gross Pay = Hours × Rate, Net Pay < Gross Pay. "
+                            "Note any assumptions made due to ambiguous text in markdown comments."
                         )
                     },
                     {"role": "user", "content": prompt}
                 ],
-                response_format={"type": "json_object"},
-                max_tokens=300,
-                temperature=0.2  # Lower temperature for more consistent results
+                max_tokens=settings.max_completion_tokens,
+                temperature=0.3
             )
-            raw_response = response.choices[0].message.content.strip()
-            
-            # Remove all markdown code blocks
-            cleaned_response = re.sub(r'```(json)?\s*|\s*```', '', raw_response, flags=re.MULTILINE)
-            
-            # Remove any non-JSON text before/after the JSON object
-            json_match = re.search(r'\{.*\}', cleaned_response, re.DOTALL)
-            if not json_match:
-                logger.warning(f"No JSON object found in chunk {chunk_index} response")
-                return []
-                
-            cleaned_response = json_match.group(0)
-            
-            # Fix common JSON issues
-            cleaned_response = re.sub(r',\s*([\]\}])', r'\1', cleaned_response)  # Trailing commas
-            cleaned_response = re.sub(r'[\x00-\x1f]', '', cleaned_response)  # Remove control chars
-
-            try:
-                result = json.loads(cleaned_response)
-                if not isinstance(result, dict):
-                    logger.warning(f"Response is not a dictionary in chunk {chunk_index}")
-                    return []
-                    
-                relationships = result.get('relationships', [])
-                if not isinstance(relationships, list):
-                    logger.warning(f"'relationships' is not a list in chunk {chunk_index}")
-                    return []
-
-                valid_relationships = []
-                for rel in relationships:
-                    if not isinstance(rel, dict):
-                        continue
-                        
-                    try:
-                        subject = self._sanitize_entity(rel.get('subject', ''))
-                        predicate = str(rel.get('predicate', '')).strip()
-                        object_ = self._sanitize_entity(rel.get('object', ''))
-                        
-                        if (subject and predicate and object_ and
-                            len(subject) <= 255 and len(object_) <= 255 and
-                            not self._contains_metadata(subject) and
-                            not self._contains_metadata(object_)):
-                            valid_relationships.append({
-                                'subject': subject,
-                                'predicate': predicate,
-                                'object': object_
-                            })
-                    except Exception as e:
-                        logger.debug(f"Error processing relationship in chunk {chunk_index}: {str(e)}")
-
-                logger.info(f"Extracted {len(valid_relationships)} valid relationships from chunk {chunk_index}")
-                return valid_relationships
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON decode failed for chunk {chunk_index}: {str(e)}")
-                logger.debug(f"Problematic response: {cleaned_response[:200]}...")
-                return []
-                
+            cleaned_text = response.choices[0].message.content.strip()
+            logger.info(f"Preprocessed OCR text for {filename}")
+            return cleaned_text
         except Exception as e:
-            logger.error(f"Unexpected error processing chunk {chunk_index}: {str(e)}", exc_info=True)
+            logger.error(f"Failed to preprocess OCR text for {filename}: {str(e)}")
+            raise
+
+    def _extract_section(self, text: str) -> str:
+        try:
+            doc = self.nlp(text)
+            for token in doc:
+                if token.text.startswith("#"):
+                    return token.text.lstrip("#").strip()
+            return "Main Section"
+        except Exception as e:
+            logger.error(f"Failed to extract section: {str(e)}")
+            return "Main Section"
+
+    async def extract_entities(self, text: str) -> List[str]:
+        try:
+            doc = self.nlp(text)
+            entities = []
+            for ent in doc.ents:
+                if ent.label_ in ["PERSON", "ORG", "GPE", "PRODUCT", "DATE", "MONEY"]:
+                    entities.append(ent.text)
+            entities = list(set(entities))  # Remove duplicates
+            logger.info(f"Extracted {len(entities)} entities from text")
+            return entities
+        except Exception as e:
+            logger.error(f"Failed to extract entities: {str(e)}")
             return []
 
-    def _sanitize_entity(self, text: str) -> str:
-        """Sanitize entity text by removing unwanted characters and normalizing whitespace"""
-        if not isinstance(text, str):
-            return ""
-        text = re.sub(r'[\n\r\t]', ' ', text)  # Remove line breaks and tabs
-        text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
-        return text.strip()[:255]  # Enforce max length
-
-    def _contains_metadata(self, text: str) -> bool:
-        """Check if text contains metadata keywords to exclude"""
-        return bool(re.search(r'\b(Date|Signature|Page|Time)\b', text, re.IGNORECASE))
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        reraise=True
-    )
-    async def generate_embeddings(self, text: str) -> List[Tuple[str, List[float]]]:
-        """Generate embeddings for text chunks, including entity and relationship extraction"""
-        chunks = self.chunk_text(text)
-        texts = [chunk['content'] for chunk in chunks]
+    async def extract_relationships(self, data: Dict[str, Any]) -> List[Dict[str, str]]:
         try:
-            response = self.client.embeddings.create(
-                input=texts,
-                model=settings.openai_embedding_model,
-                dimensions=1024  # Truncate to 1024 dimensions
-            )
-            embeddings = [item.embedding for item in response.data]
-            logger.info(f"OpenAI embeddings generated with {len(embeddings[0])} dimensions")
-
-            result = []
-            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                chunk['entities'] = await self.extract_entities(chunk['content'])
-                chunk['relationships'] = await self.extract_relationships(chunk)
-                result.append((chunk['content'], embedding))
-                logger.info(f"Generated embedding for chunk {chunk['chunk_index']} with {len(self.tokenizer.encode(chunk['content']))} tokens")
-            return result
+            text = data["content"]
+            chunk_index = str(data.get("chunk_index", 0))  # Cast to string to match SearchResult schema
+            doc = self.nlp(text)
+            relationships = []
+            for sent in doc.sents:
+                entities = [ent.text for ent in sent.ents if ent.label_ in ["PERSON", "ORG"]]
+                if len(entities) >= 2:
+                    for i in range(len(entities) - 1):
+                        relationships.append({
+                            "subject": entities[i],
+                            "object": entities[i + 1],
+                            "predicate": "related_to",
+                            "chunk_index": chunk_index
+                        })
+            logger.info(f"Extracted {len(relationships)} relationships from text")
+            return relationships
         except Exception as e:
-            logger.error(f"Embedding generation failed: {str(e)}")
-            raise
+            logger.error(f"Failed to extract relationships: {str(e)}")
+            return []

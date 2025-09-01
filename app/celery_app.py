@@ -8,23 +8,32 @@ import psycopg2
 from psycopg2.extras import Json
 from app.config import settings
 from app.utils.ocr_processor import OCRProcessor
-from app.utils.text_processor import TextProcessor
 from app.utils.qdrant_handler import QdrantHandler
-from app.utils.helpers import preprocess_ocr_text, classify_document, get_db_connection
-from app.converters import image_converter, doc_converter, excel_converter, txt_converter
+from app.utils.helpers import preprocess_ocr_text, classify_document, get_db_connection, text_processor
+from app.converters import image_converter, doc_converter, excel_converter, txt_converter, pdf_converter
 from tenacity import retry, stop_after_attempt, wait_exponential
 from contextlib import contextmanager
+from openai import OpenAIError
 
-# Configure logging
-Path(settings.data_dir).joinpath("logs").mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO if not settings.debug else logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(task_id)s - %(message)s',
-    handlers=[
-        logging.FileHandler(Path(settings.data_dir) / "logs" / "celery.log"),
-        logging.StreamHandler()
-    ]
-)
+# Configure logging with fallback to stderr
+log_dir = Path(settings.data_dir) / "logs"
+try:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO if not settings.debug else logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(task_id)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_dir / "celery.log", mode='a'),
+            logging.StreamHandler()
+        ]
+    )
+except (PermissionError, OSError) as e:
+    logging.basicConfig(
+        level=logging.INFO if not settings.debug else logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(task_id)s - %(message)s',
+        handlers=[logging.StreamHandler()]
+    )
+    logging.error(f"Failed to initialize file logging at {log_dir / 'celery.log'}: {str(e)}. Using console logging.")
 logger = logging.getLogger(__name__)
 
 # Initialize Celery
@@ -50,9 +59,8 @@ celery_app.conf.update(
 # Initialize processors
 try:
     ocr_processor = OCRProcessor()
-    text_processor = TextProcessor()
     qdrant_handler = QdrantHandler()
-    logger.info("Processors initialized successfully")
+    logger.info("OCRProcessor and QdrantHandler initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize processors: {str(e)}", exc_info=True)
     raise
@@ -78,6 +86,8 @@ def get_file_converter(file_ext: str):
         return excel_converter.convert_to_markdown
     elif file_ext in settings.supported_extensions['text']:
         return txt_converter.convert_to_markdown
+    elif file_ext in settings.supported_extensions['pdfs']:
+        return pdf_converter.convert_to_markdown
     return None
 
 def has_last_error_column(conn):
@@ -120,9 +130,13 @@ def process_ocr(self, file_id: str, user_id: str, file_ext: str, category: str |
 
         # Validate temp_upload_dir permissions
         temp_dir = Path(settings.temp_upload_dir)
-        if not os.access(temp_dir, os.W_OK):
-            logger.error(f"Temp directory {temp_dir} is not writable", extra={"task_id": task_id})
-            raise ValueError(f"Temp directory {temp_dir} is not writable")
+        try:
+            if not os.access(temp_dir, os.W_OK):
+                logger.error(f"Temp directory {temp_dir} is not writable", extra={"task_id": task_id})
+                raise ValueError(f"Temp directory {temp_dir} is not writable")
+        except Exception as e:
+            logger.error(f"Failed to check temp directory permissions: {str(e)}", extra={"task_id": task_id})
+            raise
 
         # Write temporary file
         temp_path = temp_dir / f"{file_id}{file_ext}"
@@ -136,14 +150,11 @@ def process_ocr(self, file_id: str, user_id: str, file_ext: str, category: str |
 
             # Process file
             try:
-                if file_ext in settings.supported_extensions['pdfs']:
-                    markdown_content = ocr_processor.process_pdf(str(temp_path))
-                else:
-                    converter = get_file_converter(file_ext)
-                    if not converter:
-                        logger.error(f"Unsupported file format: {file_ext} for file_id={file_id}", extra={"task_id": task_id})
-                        raise ValueError(f"Unsupported file type: {file_ext}")
-                    markdown_content = converter(str(temp_path))
+                converter = get_file_converter(file_ext)
+                if not converter:
+                    logger.error(f"Unsupported file format: {file_ext} for file_id={file_id}", extra={"task_id": task_id})
+                    raise ValueError(f"Unsupported file type: {file_ext}")
+                markdown_content = converter(str(temp_path))
                 logger.info(f"Converted file {filename} to markdown: {markdown_content[:200]}...", extra={"task_id": task_id})
             except Exception as e:
                 logger.error(f"File conversion failed for {filename}: {str(e)}", extra={"task_id": task_id}, exc_info=True)
@@ -168,11 +179,23 @@ def process_ocr(self, file_id: str, user_id: str, file_ext: str, category: str |
 
             # Generate embeddings
             try:
-                chunk_embeddings = asyncio.run(text_processor.generate_embeddings(cleaned_markdown))
-                if not chunk_embeddings:
-                    logger.error(f"No embeddings generated for {filename}", extra={"task_id": task_id})
-                    raise ValueError("No embeddings generated for the document")
-                logger.debug(f"Generated {len(chunk_embeddings)} embeddings for {filename}", extra={"task_id": task_id})
+                max_tokens = 8000  # Initial max tokens
+                for attempt in range(self.max_retries + 1):
+                    try:
+                        chunk_embeddings = asyncio.run(text_processor.generate_embeddings(cleaned_markdown))
+                        if not chunk_embeddings:
+                            logger.error(f"No embeddings generated for {filename}", extra={"task_id": task_id})
+                            raise ValueError("No embeddings generated for the document")
+                        logger.debug(f"Generated {len(chunk_embeddings)} embeddings for {filename}", extra={"task_id": task_id})
+                        break
+                    except OpenAIError as e:
+                        if "maximum context length" in str(e) and attempt < self.max_retries:
+                            max_tokens = max_tokens // 2  # Reduce chunk size
+                            logger.warning(f"Reducing chunk size to {max_tokens} tokens due to context length error", extra={"task_id": task_id})
+                            text_processor.chunk_text(cleaned_markdown, max_tokens=max_tokens)
+                            self.retry(countdown=2 ** attempt)
+                        else:
+                            raise
             except Exception as e:
                 logger.error(f"Embedding generation failed for {filename}: {str(e)}", extra={"task_id": task_id}, exc_info=True)
                 raise

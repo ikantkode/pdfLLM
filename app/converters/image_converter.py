@@ -1,23 +1,36 @@
-from PIL import Image
-import pytesseract
+import logging
 import os
+import tempfile
+import img2pdf
+from app.utils.ocr_processor import OCRProcessor
 
-def convert_to_markdown(file_path):
-    # Convert to JPG if not already
-    if file_path.lower().endswith('.heic'):
-        image = Image.open(file_path).convert("RGB")
-        jpg_path = file_path.replace('.heic', '.jpg')
-        image.save(jpg_path, "JPEG")
-        file_path = jpg_path
+logger = logging.getLogger(__name__)
+
+def convert_to_markdown(file_path: str) -> str:
+    """
+    Convert an image file to markdown by converting to PDF and using OCRProcessor.
     
-    # Perform OCR
-    text = pytesseract.image_to_string(Image.open(file_path))
+    Args:
+        file_path (str): Path to the image file (.jpg, .jpeg, .png, .heic, .webp).
+        
+    Returns:
+        str: Extracted markdown content.
+    """
+    logger.info(f"Converting image {file_path} to markdown")
+    ocr_processor = OCRProcessor()
     
-    # Convert to markdown (basic formatting)
-    markdown = f"# Extracted Text from Image\n\n{text}"
-    
-    # Clean up if we converted to JPG
-    if file_path.endswith('.jpg') and 'heic' in file_path.lower():
-        os.remove(file_path)
-    
-    return markdown
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Convert image to PDF
+            pdf_path = os.path.join(tmpdir, "temp.pdf")
+            with open(file_path, "rb") as image_file:
+                with open(pdf_path, "wb") as pdf_file:
+                    pdf_file.write(img2pdf.convert(image_file))
+            
+            # Process PDF with OCRProcessor
+            markdown_content = ocr_processor.process_pdf(pdf_path)
+            logger.info(f"Successfully converted image {file_path} to markdown")
+            return markdown_content
+    except Exception as e:
+        logger.error(f"Failed to convert image {file_path} to markdown: {str(e)}")
+        raise ValueError(f"Image conversion failed: {str(e)}")

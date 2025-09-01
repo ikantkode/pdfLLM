@@ -20,13 +20,12 @@ from openai import OpenAI
 from pydantic import BaseModel
 from app.config import settings
 from app.utils.qdrant_handler import QdrantHandler
-from app.utils.text_processor import TextProcessor
 from app.utils.ocr_processor import OCRProcessor
+from app.utils.helpers import preprocess_ocr_text, classify_document, get_db_connection, text_processor
 from app.converters import image_converter, doc_converter, excel_converter, txt_converter
 from app.celery_app import celery_app
-from app.utils.helpers import preprocess_ocr_text, classify_document, get_db_connection
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, MatchAny
-from psycopg2.extras import Json  # Added to fix NameError
+from psycopg2.extras import Json
 
 # Initialize tokenizer
 tokenizer = tiktoken.get_encoding("cl100k_base")
@@ -111,13 +110,6 @@ except Exception as e:
     logger.error(f"Qdrant connection failed after retries: {str(e)}")
     raise
 
-try:
-    text_processor = TextProcessor()
-    logger.info("TextProcessor initialized successfully")
-except Exception as e:
-    logger.error(f"TextProcessor initialization failed: {str(e)}")
-    raise
-
 # Create necessary directories
 Path(settings.temp_upload_dir).mkdir(parents=True, exist_ok=True)
 
@@ -134,6 +126,7 @@ class FileMetadata(BaseModel):
     checksum: str
     category: Optional[str] = None
     status: str
+    last_error: Optional[str] = None
 
 class ChatMessage(BaseModel):
     message_id: str
@@ -530,7 +523,7 @@ async def list_documents(
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT file_id, filename, file_type, upload_date, size, category, status FROM file_metadata WHERE user_id = %s",
+                    "SELECT file_id, filename, file_type, upload_date, size, category, status, last_error FROM file_metadata WHERE user_id = %s",
                     (user_id,)
                 )
                 documents = [
@@ -541,7 +534,8 @@ async def list_documents(
                         "upload_date": row[3].isoformat(),
                         "size": row[4],
                         "category": row[5],
-                        "status": row[6]
+                        "status": row[6],
+                        "last_error": row[7]
                     }
                     for row in cur.fetchall()
                 ]
